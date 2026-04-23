@@ -312,7 +312,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		if i < len(res.FileIDs) {
 			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
 		}
-		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL)
+		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL, req.Upscale)
 		if err != nil {
 			logger.L().Warn("b64_json fetch failed",
 				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
@@ -512,7 +512,7 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 		if i < len(res.FileIDs) {
 			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
 		}
-		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL)
+		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL, "")
 		if err != nil {
 			logger.L().Warn("chat->image b64 fetch failed",
 				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
@@ -820,7 +820,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		if i < len(res.FileIDs) {
 			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
 		}
-		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL)
+		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL, upscale)
 		if err != nil {
 			logger.L().Warn("b64_json fetch failed",
 				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
@@ -1014,55 +1014,63 @@ func maybeAppendClaritySuffix(prompt string) string {
 }
 
 
-// fetchAndEncodeBase64 下载上游图片并转 base64。
-// 复用 ImageProxy 同样的鉴权链路:通过账号 AT/cookies/proxy 构建 chatgpt client 下载。
-func fetchAndEncodeBase64(ctx context.Context, h *Handler, accountID uint64, signedURL string) (string, error) {
+// fetchAndEncodeBase64 下载上游图片，按需放大，转 base64。
+func fetchAndEncodeBase64(ctx context.Context, h *Handler, accountID uint64, signedURL, upscale string) (string, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	// 直接用签名 URL 尝试（file-service 直链不需要鉴权）
+	var body []byte
+
+	// 先尝试直连（file-service 直链不需要鉴权）
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, signedURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err == nil && resp.StatusCode < 400 {
-		defer resp.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+		body, err = io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+		resp.Body.Close()
 		if err != nil {
 			return "", fmt.Errorf("read body: %w", err)
 		}
-		return base64.StdEncoding.EncodeToString(body), nil
-	}
-	// 直连失败（estuary URL 需要鉴权），走 chatgpt client
-	if resp != nil {
-		resp.Body.Close()
+	} else {
+		// 直连失败（estuary URL 需要鉴权），走 chatgpt client
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if h.Images == nil || h.Images.ImageAccResolver == nil {
+			return "", fmt.Errorf("image account resolver not available")
+		}
+		at, deviceID, cookies, err := h.Images.ImageAccResolver.AuthToken(dlCtx, accountID)
+		if err != nil {
+			return "", fmt.Errorf("resolve account: %w", err)
+		}
+		proxyURL := h.Images.ImageAccResolver.ProxyURL(dlCtx, accountID)
+		cli, err := chatgpt.New(chatgpt.Options{
+			AuthToken: at, DeviceID: deviceID, ProxyURL: proxyURL, Cookies: cookies,
+			Timeout: 60 * time.Second,
+		})
+		if err != nil {
+			return "", fmt.Errorf("build chatgpt client: %w", err)
+		}
+		body, _, err = cli.FetchImage(dlCtx, signedURL, 20*1024*1024)
+		if err != nil {
+			return "", fmt.Errorf("fetch via chatgpt client: %w", err)
+		}
 	}
 
-	if h.Images == nil || h.Images.ImageAccResolver == nil {
-		return "", fmt.Errorf("image account resolver not available")
+	// 按需放大
+	scale := image.ValidateUpscale(upscale)
+	if scale != "" {
+		upBytes, _, err := image.DoUpscale(body, scale)
+		if err != nil {
+			logger.L().Warn("upscale failed, returning original",
+				zap.Error(err), zap.String("scale", scale))
+		} else if len(upBytes) > 0 {
+			body = upBytes
+		}
 	}
 
-	at, deviceID, cookies, err := h.Images.ImageAccResolver.AuthToken(dlCtx, accountID)
-	if err != nil {
-		return "", fmt.Errorf("resolve account: %w", err)
-	}
-	proxyURL := h.Images.ImageAccResolver.ProxyURL(dlCtx, accountID)
-
-	cli, err := chatgpt.New(chatgpt.Options{
-		AuthToken: at,
-		DeviceID:  deviceID,
-		ProxyURL:  proxyURL,
-		Cookies:   cookies,
-		Timeout:   60 * time.Second,
-	})
-	if err != nil {
-		return "", fmt.Errorf("build chatgpt client: %w", err)
-	}
-	body, _, err := cli.FetchImage(dlCtx, signedURL, 20*1024*1024)
-	if err != nil {
-		return "", fmt.Errorf("fetch via chatgpt client: %w", err)
-	}
 	return base64.StdEncoding.EncodeToString(body), nil
 }
 
