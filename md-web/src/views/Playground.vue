@@ -83,17 +83,18 @@ async function generate() {
   const total = gptN.value
   try {
     if (isGemini.value) {
-      addLog(`${total} 张并发请求中...`)
-      // Gemini 也并发请求 N 次
-      const tasks = Array.from({ length: total }, () => generateGemini(selectedModel.value, prompt.value))
-      const results = await Promise.allSettled(tasks)
+      addLog(`${total} 张逐张生成中...`)
+      // Gemini 串行逐张请求，避免上游并发过高报错
       const urls: string[] = []; let lastText = ''
-      results.forEach((r, i) => {
-        if (r.status === 'fulfilled') {
-          if (r.value.imageUrls.length) urls.push(...r.value.imageUrls)
-          if (r.value.text) lastText = r.value.text
-        } else { addLog(`⚠️ 第${i+1}张失败: ${r.reason?.message}`) }
-      })
+      for (let i = 0; i < total; i++) {
+        addLog(`⏳ 第 ${i + 1}/${total} 张...`)
+        try {
+          const { imageUrls, text } = await generateGemini(selectedModel.value, prompt.value)
+          if (imageUrls.length) urls.push(...imageUrls)
+          if (text) lastText = text
+          if (!imageUrls.length) addLog(`⚠️ 第${i + 1}张未返回图片`)
+        } catch (e: any) { addLog(`⚠️ 第${i + 1}张失败: ${e.message}`) }
+      }
       if (urls.length) {
         history.value.unshift({ model: selectedModel.value, time: new Date().toLocaleTimeString(), images: urls })
         addLog(`✅ ${urls.length}张 ${((Date.now()-t0)/1000).toFixed(1)}s`)
