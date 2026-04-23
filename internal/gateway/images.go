@@ -65,7 +65,7 @@ type ImageGenRequest struct {
 	Size            string   `json:"size"`
 	Quality         string   `json:"quality,omitempty"`
 	Style           string   `json:"style,omitempty"`
-	ResponseFormat  string   `json:"response_format,omitempty"` // url | b64_json(暂仅支持 url)
+	ResponseFormat  string   `json:"response_format,omitempty"` // url | b64_json,默认 url
 	User            string   `json:"user,omitempty"`
 	ReferenceImages []string `json:"reference_images,omitempty"` // 非标准扩展,见注释
 	// Upscale 非标准扩展:控制"本服务对原图做本地高清放大"的目标档位。
@@ -79,6 +79,7 @@ type ImageGenRequest struct {
 // ImageGenData 单张图响应。
 type ImageGenData struct {
 	URL           string `json:"url,omitempty"`
+	B64JSON       string `json:"b64_json,omitempty"`
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
 	FileID        string `json:"file_id,omitempty"` // chatgpt.com 侧原始 id(用于对账)
 }
@@ -297,16 +298,23 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		_ = h.DAO.UpdateCost(c.Request.Context(), taskID, cost)
 	}
 
-	// 9) 响应:URL 统一走自家代理,防止 chatgpt.com estuary/content 防盗链
+	// 9) 响应:强制 b64_json,不暴露任何域名。
 	out := ImageGenResponse{
 		Created: time.Now().Unix(),
 		TaskID:  taskID,
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
-	for i := range res.SignedURLs {
-		d := ImageGenData{URL: BuildImageProxyURL(taskID, i, ImageProxyTTL)}
+	for i, signedURL := range res.SignedURLs {
+		d := ImageGenData{}
 		if i < len(res.FileIDs) {
 			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
+		}
+		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL)
+		if err != nil {
+			logger.L().Warn("b64_json fetch failed",
+				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
+		} else {
+			d.B64JSON = b64
 		}
 		out.Data = append(out.Data, d)
 	}
@@ -490,34 +498,27 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	rec.CreditCost = cost
 	rec.DurationMs = int(time.Since(startAt).Milliseconds())
 
-	// 以 chat 响应返回(content 里内嵌 markdown 图片)。
-	var sb strings.Builder
-	for i := range res.SignedURLs {
-		if i > 0 {
-			sb.WriteString("\n\n")
-		}
-		sb.WriteString(fmt.Sprintf("![generated](%s)", BuildImageProxyURL(taskID, i, ImageProxyTTL)))
-	}
-	resp := ChatCompletionResponse{
-		ID:      "chatcmpl-" + uuid.NewString(),
-		Object:  "chat.completion",
+	// 直接返回 images 标准格式(b64_json),不走 chat markdown 内嵌。
+	out := ImageGenResponse{
 		Created: time.Now().Unix(),
-		Model:   m.Slug,
-		Choices: []ChatCompletionChoice{{
-			Index: 0,
-			Message: chatMsg{
-				Role:    "assistant",
-				Content: sb.String(),
-			},
-			FinishReason: "stop",
-		}},
-		Usage: ChatCompletionUsage{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
-		},
+		TaskID:  taskID,
+		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
-	c.JSON(http.StatusOK, resp)
+	for i, signedURL := range res.SignedURLs {
+		d := ImageGenData{}
+		if i < len(res.FileIDs) {
+			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
+		}
+		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL)
+		if err != nil {
+			logger.L().Warn("chat->image b64 fetch failed",
+				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
+		} else {
+			d.B64JSON = b64
+		}
+		out.Data = append(out.Data, d)
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // extractLastUserPrompt 从 messages 中拿最后一条 user 消息的 content。
@@ -810,10 +811,17 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		TaskID:  taskID,
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
-	for i := range res.SignedURLs {
-		d := ImageGenData{URL: BuildImageProxyURL(taskID, i, ImageProxyTTL)}
+	for i, signedURL := range res.SignedURLs {
+		d := ImageGenData{}
 		if i < len(res.FileIDs) {
 			d.FileID = strings.TrimPrefix(res.FileIDs[i], "sed:")
+		}
+		b64, err := fetchAndEncodeBase64(c.Request.Context(), h.Handler, res.AccountID, signedURL)
+		if err != nil {
+			logger.L().Warn("b64_json fetch failed",
+				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
+		} else {
+			d.B64JSON = b64
 		}
 		out.Data = append(out.Data, d)
 	}
@@ -999,4 +1007,57 @@ func maybeAppendClaritySuffix(prompt string) string {
 		return prompt + claritySuffix
 	}
 	return prompt
+}
+
+
+// fetchAndEncodeBase64 下载上游图片并转 base64。
+// 复用 ImageProxy 同样的鉴权链路:通过账号 AT/cookies/proxy 构建 chatgpt client 下载。
+func fetchAndEncodeBase64(ctx context.Context, h *Handler, accountID uint64, signedURL string) (string, error) {
+	dlCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	// 直接用签名 URL 尝试（file-service 直链不需要鉴权）
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, signedURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil && resp.StatusCode < 400 {
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+		if err != nil {
+			return "", fmt.Errorf("read body: %w", err)
+		}
+		return base64.StdEncoding.EncodeToString(body), nil
+	}
+	// 直连失败（estuary URL 需要鉴权），走 chatgpt client
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	if h.Images == nil || h.Images.ImageAccResolver == nil {
+		return "", fmt.Errorf("image account resolver not available")
+	}
+
+	at, deviceID, cookies, err := h.Images.ImageAccResolver.AuthToken(dlCtx, accountID)
+	if err != nil {
+		return "", fmt.Errorf("resolve account: %w", err)
+	}
+	proxyURL := h.Images.ImageAccResolver.ProxyURL(dlCtx, accountID)
+
+	cli, err := chatgpt.New(chatgpt.Options{
+		AuthToken: at,
+		DeviceID:  deviceID,
+		ProxyURL:  proxyURL,
+		Cookies:   cookies,
+		Timeout:   60 * time.Second,
+	})
+	if err != nil {
+		return "", fmt.Errorf("build chatgpt client: %w", err)
+	}
+	body, _, err := cli.FetchImage(dlCtx, signedURL, 20*1024*1024)
+	if err != nil {
+		return "", fmt.Errorf("fetch via chatgpt client: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(body), nil
 }

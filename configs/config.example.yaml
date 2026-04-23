@@ -10,7 +10,7 @@ log:
   output: stdout        # stdout | /var/log/gpt2api.log
 
 mysql:
-  dsn: "gpt2api:gpt2api@tcp(127.0.0.1:3306)/gpt2api?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+  dsn: "gpt2api:GbN8TX7eXeE8WCr4@tcp(mysql:3306)/gpt2api?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci"
   # 开发期 100 够用;生产目标 2000 chat SSE + 1000 图,推荐 500,MySQL 侧 max_connections>=1000
   max_open_conns: 100
   max_idle_conns: 20

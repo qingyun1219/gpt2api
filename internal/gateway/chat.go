@@ -49,6 +49,11 @@ type Handler struct {
 	// Images 可选:若挂载,chat/completions 里指定图像模型会自动转派。
 	Images *ImagesHandler
 
+	// BaseURL 对外基础地址(如 https://api.example.com),用于给 /v1/* API
+	// 返回的图片代理 URL 拼上完整域名,让外部调用方能直接访问。
+	// 来自 config.yaml 的 app.base_url。
+	BaseURL string
+
 	// Settings 可选:若注入则在构造上游 client 时应用动态超时。
 	Settings interface {
 		GatewayUpstreamTimeoutSec() int

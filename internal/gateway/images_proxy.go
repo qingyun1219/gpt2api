@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,6 +82,19 @@ func BuildImageProxyURL(taskID string, idx int, ttl time.Duration) string {
 	expMs := time.Now().Add(ttl).UnixMilli()
 	sig := computeImgSig(taskID, idx, expMs)
 	return fmt.Sprintf("/p/img/%s/%d?exp=%d&sig=%s", taskID, idx, expMs, sig)
+}
+
+// BuildImageProxyAbsoluteURL 生成带 base_url 前缀的完整图片代理 URL。
+// 用于 /v1/* API 返回给外部调用方,这样第三方程序可以直接访问。
+// baseURL 来自 config.yaml 的 app.base_url,如 "https://api.example.com"。
+// 如果 baseURL 为空,则回退到相对路径。
+func BuildImageProxyAbsoluteURL(baseURL, taskID string, idx int, ttl time.Duration) string {
+	path := BuildImageProxyURL(taskID, idx, ttl)
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		return path
+	}
+	return baseURL + path
 }
 
 func computeImgSig(taskID string, idx int, expMs int64) string {

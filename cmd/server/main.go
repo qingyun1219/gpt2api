@@ -139,6 +139,7 @@ func main() {
 		Limiter:   limiter,
 		Usage:     usageLogger,
 		AccSvc:    accSvc,
+		BaseURL:   cfg.App.BaseURL,
 	}
 
 	imageDAO := image.NewDAO(sqldb)

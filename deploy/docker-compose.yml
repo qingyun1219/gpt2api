@@ -27,6 +27,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - cpa-net
 
   redis:
     image: redis:7-alpine
@@ -42,6 +44,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    networks:
+      - cpa-net
 
   server:
     build:
@@ -58,20 +62,24 @@ services:
     environment:
       TZ: Asia/Shanghai
       # entrypoint.sh 会用这些值等 MySQL + goose up
-      MYSQL_HOST: mysql
+      # 使用 container_name 而非服务名,避免多 compose 项目共享外部网络时
+      # 同名服务(如 newapi 也有 "mysql")DNS 冲突。
+      MYSQL_HOST: gpt2api-mysql
       MYSQL_PORT: 3306
       MYSQL_USER: ${MYSQL_USER:-gpt2api}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gpt2api}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-gpt2api}
       # 通过 GPT2API_* 覆盖 config.yaml 中的任一字段
-      GPT2API_MYSQL_DSN: "${MYSQL_USER:-gpt2api}:${MYSQL_PASSWORD:-gpt2api}@tcp(mysql:3306)/${MYSQL_DATABASE:-gpt2api}?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci"
-      GPT2API_REDIS_ADDR: "redis:6379"
+      GPT2API_MYSQL_DSN: "${MYSQL_USER:-gpt2api}:${MYSQL_PASSWORD:-gpt2api}@tcp(gpt2api-mysql:3306)/${MYSQL_DATABASE:-gpt2api}?parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      GPT2API_REDIS_ADDR: "gpt2api-redis:6379"
       GPT2API_BACKUP_DIR: /app/data/backups
       GPT2API_BACKUP_RETENTION: ${BACKUP_RETENTION:-30}
       GPT2API_BACKUP_ALLOW_RESTORE: ${BACKUP_ALLOW_RESTORE:-false}
       # 强烈建议在 .env 中覆盖下列两项
       GPT2API_JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me_in_production_please_32b}
       GPT2API_CRYPTO_AES_KEY: ${CRYPTO_AES_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      # 对外 base_url,图片代理 URL 会拼上这个前缀,外部 API 调用方才能正确访问
+      GPT2API_APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
     ports:
       - "${HTTP_PORT:-8080}:8080"
     # 给容器指定独立公共 DNS,避免宿主 Clash/V2Ray 等梯子劫持了
@@ -85,8 +93,16 @@ services:
       - backups:/app/data/backups
       - ./logs:/app/logs
     command: ["/app/gpt2api", "-c", "/app/configs/config.yaml"]
+    networks:
+      cpa-net:
+        aliases:
+          - cpa
 
 volumes:
   mysql_data:
   redis_data:
   backups:
+
+networks:
+  cpa-net:
+    external: true
