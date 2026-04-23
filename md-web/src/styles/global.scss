@@ -1,0 +1,77 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #ffffff;
+  --bg-soft: #fafafa;
+  --bg-card: rgba(255, 255, 255, 0.8);
+  --bg-card-solid: #ffffff;
+  --text: #1d1d1f;
+  --text-soft: #6e6e73;
+  --text-mute: #aeaeb2;
+  --border: rgba(0, 0, 0, 0.06);
+  --nav-bg: rgba(255, 255, 255, 0.82);
+  --primary: #0071e3;
+  --primary-soft: rgba(0, 113, 227, 0.08);
+  --accent: #bf5af2;
+  --green: #30d158;
+  --radius: 16px;
+  --radius-sm: 10px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.06);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.08);
+}
+
+html.dark {
+  --bg: #000000;
+  --bg-soft: #1c1c1e;
+  --bg-card: rgba(28, 28, 30, 0.8);
+  --bg-card-solid: #1c1c1e;
+  --text: #f5f5f7;
+  --text-soft: #a1a1a6;
+  --text-mute: #636366;
+  --border: rgba(255, 255, 255, 0.08);
+  --nav-bg: rgba(0, 0, 0, 0.82);
+  --primary-soft: rgba(0, 113, 227, 0.15);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.3);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.4);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
+    'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #0071e3 0%, #bf5af2 50%, #30d158 100%);
+  background-size: 200% 200%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: grad-flow 6s ease-in-out infinite;
+}
+
+@keyframes grad-flow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* Element Plus 覆盖 - 苹果风 */
+.el-button--primary {
+  --el-button-bg-color: var(--primary);
+  --el-button-border-color: var(--primary);
+  border-radius: 980px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+.el-input__wrapper, .el-textarea__inner, .el-select__wrapper {
+  border-radius: var(--radius-sm) !important;
+}
+.el-dialog {
+  border-radius: var(--radius) !important;
+}
