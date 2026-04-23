@@ -639,20 +639,39 @@ func openAIError(c *gin.Context, httpStatus int, code, msg string) {
 }
 
 // ListModels GET /v1/models
+// 图像模型会自动追加 -2k / -4k 虚拟变体,调用方选择即可自动放大。
 func (h *Handler) ListModels(c *gin.Context) {
 	list, err := h.Models.ListEnabled(c.Request.Context())
 	if err != nil {
 		openAIError(c, http.StatusInternalServerError, "list_models_error", "获取模型列表失败:"+err.Error())
 		return
 	}
-	data := make([]gin.H, 0, len(list))
+	data := make([]gin.H, 0, len(list)*3)
 	for _, m := range list {
 		data = append(data, gin.H{
-			"id":       m.Slug,
-			"object":   "model",
-			"created":  m.CreatedAt.Unix(),
-			"owned_by": "chatgpt",
+			"id":          m.Slug,
+			"object":      "model",
+			"created":     m.CreatedAt.Unix(),
+			"owned_by":    "chatgpt",
+			"description": m.Description,
 		})
+		// 图像模型追加 2k/4k 虚拟变体
+		if m.Type == "image" {
+			data = append(data, gin.H{
+				"id":          m.Slug + "-2k",
+				"object":      "model",
+				"created":     m.CreatedAt.Unix(),
+				"owned_by":    "chatgpt",
+				"description": m.Description + " (2K高清放大)",
+			})
+			data = append(data, gin.H{
+				"id":          m.Slug + "-4k",
+				"object":      "model",
+				"created":     m.CreatedAt.Unix(),
+				"owned_by":    "chatgpt",
+				"description": m.Description + " (4K超清放大)",
+			})
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }

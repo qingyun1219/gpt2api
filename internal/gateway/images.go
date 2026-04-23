@@ -112,6 +112,9 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 	if req.Model == "" {
 		req.Model = "gpt-image-2"
 	}
+	// 支持虚拟模型后缀: gpt-image-2-2k / gpt-image-2-4k
+	// 自动解析 upscale 并还原成真实模型名,调用方无需传 upscale 参数。
+	req.Model, req.Upscale = parseModelUpscale(req.Model, req.Upscale)
 	if req.N <= 0 {
 		req.N = 1
 	}
@@ -617,6 +620,8 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	if model == "" {
 		model = "gpt-image-2"
 	}
+	upscale := image.ValidateUpscale(c.Request.FormValue("upscale"))
+	model, upscale = parseModelUpscale(model, upscale)
 	n := 1
 	if s := c.Request.FormValue("n"); s != "" {
 		if v, err := parseIntClamp(s, 1, 4); err == nil {
@@ -627,7 +632,6 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 	if size == "" {
 		size = "1024x1024"
 	}
-	upscale := image.ValidateUpscale(c.Request.FormValue("upscale"))
 
 	// 主图 + 可能的多张
 	files, err := collectEditFiles(c.Request.MultipartForm)
@@ -1060,4 +1064,21 @@ func fetchAndEncodeBase64(ctx context.Context, h *Handler, accountID uint64, sig
 		return "", fmt.Errorf("fetch via chatgpt client: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(body), nil
+}
+
+
+// parseModelUpscale 从模型名后缀解析 upscale 档位。
+// 例如 "gpt-image-2-2k" → model="gpt-image-2", upscale="2k"
+// 如果调用方已经通过请求参数显式传了 upscale,则参数优先。
+func parseModelUpscale(model, existingUpscale string) (string, string) {
+	if existingUpscale != "" {
+		return model, image.ValidateUpscale(existingUpscale)
+	}
+	if strings.HasSuffix(model, "-4k") {
+		return strings.TrimSuffix(model, "-4k"), "4k"
+	}
+	if strings.HasSuffix(model, "-2k") {
+		return strings.TrimSuffix(model, "-2k"), "2k"
+	}
+	return model, image.ValidateUpscale(existingUpscale)
 }
