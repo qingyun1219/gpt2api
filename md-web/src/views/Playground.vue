@@ -12,8 +12,6 @@ const selectedModel = ref('')
 const prompt = ref('一只可爱的橘猫趴在窗台上晒太阳，窗外是樱花盛开的春天')
 const uploadedImages = ref<string[]>([])
 const generating = ref(false)
-const resultImages = ref<string[]>([])
-const resultText = ref('')
 const logs = ref<string[]>([])
 const previewVisible = ref(false)
 const previewUrl = ref('')
@@ -30,12 +28,11 @@ const RATIOS: RatioOpt[] = [
 const gptRatio = ref('1:1')
 const gptN = ref(1)
 const gptSize = computed(() => RATIOS.find(r => r.ratio === gptRatio.value)?.size ?? '1024x1024')
-const isImageModel = computed(() => selectedModel.value.includes('image'))
 const isGemini = computed(() => selectedModel.value.includes('gemini'))
 
+// 比例对所有模型通用：通过 prompt 前缀控制
 const RATIO_RE = /^\s*Make the aspect ratio\s+\S+\s*,\s*/i
 watch(gptRatio, (nv) => {
-  if (!isImageModel.value || isGemini.value) return
   const prefix = `Make the aspect ratio ${nv} , `
   const lines = prompt.value.split(/\r?\n/)
   if (lines.length > 0 && RATIO_RE.test(lines[0])) {
@@ -75,24 +72,40 @@ function downloadImage(url: string, idx: number) {
   const a = document.createElement('a'); a.href = url; a.download = `ai_${Date.now()}_${idx}.png`; a.click()
 }
 
+// 历史结果：每次生成追加，不清空
+interface ResultBatch { model: string; time: string; images: string[]; text?: string }
+const history = ref<ResultBatch[]>([])
+
 async function generate() {
   if (!selectedModel.value || !prompt.value.trim() || !config.apiKey) return
-  generating.value = true; resultImages.value = []; resultText.value = ''; logs.value = []
+  generating.value = true; logs.value = []
   addLog(`模型: ${selectedModel.value}`); const t0 = Date.now()
+  const total = gptN.value
   try {
     if (isGemini.value) {
-      addLog('请求中...')
-      for (let i = 1; i <= 3; i++) {
-        if (i > 1) addLog(`重试 ${i}/3...`)
-        const { imageUrls, text } = await generateGemini(selectedModel.value, prompt.value)
-        if (imageUrls.length) { resultImages.value = imageUrls
-          addLog(`✅ 完成 ${((Date.now()-t0)/1000).toFixed(1)}s`); break }
-        if (i === 3) { addLog('⚠️ 未返回图片'); if (text) resultText.value = text }
+      addLog(`${total} 张并发请求中...`)
+      // Gemini 也并发请求 N 次
+      const tasks = Array.from({ length: total }, () => generateGemini(selectedModel.value, prompt.value))
+      const results = await Promise.allSettled(tasks)
+      const urls: string[] = []; let lastText = ''
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') {
+          if (r.value.imageUrls.length) urls.push(...r.value.imageUrls)
+          if (r.value.text) lastText = r.value.text
+        } else { addLog(`⚠️ 第${i+1}张失败: ${r.reason?.message}`) }
+      })
+      if (urls.length) {
+        history.value.unshift({ model: selectedModel.value, time: new Date().toLocaleTimeString(), images: urls })
+        addLog(`✅ ${urls.length}张 ${((Date.now()-t0)/1000).toFixed(1)}s`)
+      } else {
+        addLog('⚠️ 未返回图片')
+        if (lastText) history.value.unshift({ model: selectedModel.value, time: new Date().toLocaleTimeString(), images: [], text: lastText })
       }
     } else {
-      const total = gptN.value; const hasRef = uploadedImages.value.length > 0
+      const hasRef = uploadedImages.value.length > 0
       addLog(`${hasRef?'图生图':'文生图'} · ${gptRatio.value} · ${total}张`)
       addLog('⏳ 生图中...')
+      // GPT 也是并发 N 个请求
       const tasks = Array.from({ length: total }, () => hasRef
         ? editImage(selectedModel.value, prompt.value, uploadedImages.value, 1, gptSize.value)
         : generateImage(selectedModel.value, prompt.value, 1, gptSize.value))
@@ -100,8 +113,10 @@ async function generate() {
       const urls: string[] = []
       results.forEach((r, i) => { if (r.status==='fulfilled' && r.value.imageUrls.length) urls.push(...r.value.imageUrls)
         else addLog(`⚠️ 第${i+1}张失败`) })
-      resultImages.value = urls
-      addLog(urls.length ? `✅ ${urls.length}张 ${((Date.now()-t0)/1000).toFixed(1)}s` : '❌ 失败')
+      if (urls.length) {
+        history.value.unshift({ model: selectedModel.value, time: new Date().toLocaleTimeString(), images: urls })
+        addLog(`✅ ${urls.length}张 ${((Date.now()-t0)/1000).toFixed(1)}s`)
+      } else addLog('❌ 全部失败')
     }
   } catch (e: any) { addLog(`❌ ${e.message}`) }
   finally { generating.value = false }
@@ -126,32 +141,21 @@ async function generate() {
         {{ connecting?'连接中...':'连接' }}</el-button>
     </div>
 
-    <div class="pnl"><div class="pnl-h">选择模型</div>
-      <div class="model-list">
-        <div v-for="m in models" :key="m.id" :class="['m-item', {active: selectedModel===m.id}]"
-          @click="selectedModel=m.id">
-          <span class="m-name">{{ m.id }}</span>
-          <span v-if="m.description" class="m-desc">{{ m.description }}</span>
-        </div>
-        <div v-if="!models.length" class="hint">请先连接 API</div>
-      </div>
-    </div>
-
     <div class="pnl"><div class="pnl-h">提示词</div>
       <el-input v-model="prompt" type="textarea" :rows="4" placeholder="描述你想生成的内容..." resize="vertical"/>
     </div>
 
-    <div v-if="isImageModel && !isGemini" class="pnl"><div class="pnl-h">画面比例 <span class="sub">{{ gptRatio }}</span></div>
+    <div class="pnl"><div class="pnl-h">画面比例 <span class="sub">{{ gptRatio }}</span></div>
       <div class="ratio-row">
         <button v-for="r in RATIOS" :key="r.ratio" :class="['r-btn',{active:gptRatio===r.ratio}]" @click="gptRatio=r.ratio">{{ r.label }}</button>
       </div>
     </div>
 
-    <div v-if="isImageModel && !isGemini" class="pnl"><div class="pnl-h">生成张数 <span class="sub">{{ gptN }}</span></div>
+    <div class="pnl"><div class="pnl-h">生成张数 <span class="sub">{{ gptN }}</span></div>
       <el-slider v-model="gptN" :min="1" :max="4" show-stops/>
     </div>
 
-    <div v-if="isImageModel && !isGemini" class="pnl"><div class="pnl-h">参考图片 <span class="sub">可选 · 图生图</span></div>
+    <div v-if="!isGemini" class="pnl"><div class="pnl-h">参考图片 <span class="sub">可选 · 图生图</span></div>
       <el-button size="small" round @click="triggerFileInput" :disabled="uploadedImages.length>=4"><el-icon><Plus/></el-icon> 选择图片</el-button>
       <div v-if="uploadedImages.length" class="thumbs">
         <div v-for="(img,i) in uploadedImages" :key="i" class="th">
@@ -166,16 +170,30 @@ async function generate() {
   </aside>
 
   <main class="main">
+    <!-- 模型选择在右侧上方 -->
+    <div class="pnl"><div class="pnl-h">选择模型</div>
+      <div class="model-row">
+        <div v-for="m in models" :key="m.id" :class="['m-chip', {active: selectedModel===m.id}]"
+          @click="selectedModel=m.id">
+          {{ m.id }}
+        </div>
+        <div v-if="!models.length" class="hint">请先连接 API</div>
+      </div>
+    </div>
+
+    <!-- 日志 -->
     <div class="pnl log-pnl"><div class="pnl-h">
-      <span class="dot" :class="generating?'run':resultImages.length?'ok':'idle'"></span>
-      {{ generating?'生成中...':resultImages.length?'已完成':'等待中' }}</div>
+      <span class="dot" :class="generating?'run':history.length?'ok':'idle'"></span>
+      {{ generating?'生成中...':history.length?'已完成':'等待中' }}</div>
       <div class="log-box"><div v-if="!logs.length" class="log-ph">选择模型并点击生成按钮</div>
         <div v-for="(l,i) in logs" :key="i" class="log-ln">{{ l }}</div></div>
     </div>
 
-    <div v-if="resultImages.length" class="pnl"><div class="pnl-h">生成结果 · {{ resultImages.length }} 张</div>
-      <div class="r-grid">
-        <div v-for="(url,i) in resultImages" :key="i" class="r-item">
+    <!-- 历史结果（每次生成追加，不清空） -->
+    <div v-for="(batch, bi) in history" :key="bi" class="pnl">
+      <div class="pnl-h">{{ batch.model }} <span class="sub">{{ batch.time }}</span></div>
+      <div v-if="batch.images.length" class="r-grid">
+        <div v-for="(url,i) in batch.images" :key="i" class="r-item">
           <img :src="url" @click="openPreview(url)"/>
           <div class="r-actions">
             <button @click="openPreview(url)">预览</button>
@@ -183,10 +201,7 @@ async function generate() {
           </div>
         </div>
       </div>
-    </div>
-
-    <div v-if="resultText && !resultImages.length" class="pnl">
-      <div class="pnl-h">返回内容</div><pre class="r-text">{{ resultText }}</pre>
+      <pre v-if="batch.text" class="r-text">{{ batch.text }}</pre>
     </div>
   </main></div>
 
@@ -209,13 +224,10 @@ async function generate() {
 .sub{font-size:12px;color:var(--text-mute);font-weight:400}
 .hint{color:var(--text-mute);font-size:13px;padding:12px 0;text-align:center}
 
-.model-list{max-height:280px;overflow-y:auto;margin:0 -4px}
-.m-item{padding:10px 14px;border-radius:var(--radius-sm);cursor:pointer;transition:all .15s;margin-bottom:2px;display:flex;flex-direction:column;gap:2px}
-.m-item:hover{background:var(--primary-soft)}
-.m-item.active{background:var(--primary-soft);color:var(--primary);font-weight:600;
-  .m-name{color:var(--primary)}}
-.m-name{font-size:13px;font-weight:500}
-.m-desc{font-size:11px;color:var(--text-mute)}
+.model-row{display:flex;flex-wrap:wrap;gap:8px}
+.m-chip{padding:8px 16px;border-radius:980px;border:1.5px solid var(--border);cursor:pointer;font-size:13px;font-weight:500;color:var(--text-soft);transition:all .15s;background:var(--bg-soft);white-space:nowrap}
+.m-chip:hover{border-color:var(--primary);color:var(--primary)}
+.m-chip.active{border-color:var(--primary);background:var(--primary-soft);color:var(--primary);font-weight:600}
 
 .ratio-row{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .r-btn{background:var(--bg-soft);border:1.5px solid var(--border);border-radius:var(--radius-sm);padding:10px 4px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text-soft);transition:all .15s;font-family:inherit}

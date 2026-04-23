@@ -18,16 +18,21 @@ export interface ModelInfo {
   type: 'image' | 'chat' | string
 }
 
-/** 获取模型列表 —— 不过滤,返回所有模型(含 -2k / -4k 变体) */
+/** 只展示这 4 个生图模型 */
+const ALLOWED_MODELS = ['gemini-3.1-flash-image', 'gpt-image-2', 'gpt-image-2-2k', 'gpt-image-2-4k']
+
+/** 获取模型列表 —— 只保留指定的 4 个生图模型 */
 export async function fetchModels(): Promise<ModelInfo[]> {
   const resp = await fetch(`${base()}/v1/models`, { headers: headers() })
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   const data = await resp.json()
-  return (data.data || []).map((m: any) => ({
-    id: m.id as string,
-    description: (m.description || '') as string,
-    type: (m.id?.includes('image') ? 'image' : 'chat') as string,
-  }))
+  return (data.data || [])
+    .filter((m: any) => ALLOWED_MODELS.includes(m.id))
+    .map((m: any) => ({
+      id: m.id as string,
+      description: (m.description || '') as string,
+      type: 'image' as string,
+    }))
 }
 
 /** GPT Image 文生图 — /v1/images/generations */
