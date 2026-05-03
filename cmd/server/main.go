@@ -175,6 +175,12 @@ func main() {
 	meUsageH := usage.NewMeHandler(usageQDAO)
 	meImageH := image.NewMeHandler(imageDAO)
 	adminImageH := image.NewAdminHandler(imageDAO)
+	// 注入代理 URL 构造器,避免前端直接用上游签名 URL(会过期/被墙)
+	proxyURLBuilder := func(taskID string, idx int) string {
+		return gateway.BuildImageProxyURL(taskID, idx, gateway.ImageProxyTTL)
+	}
+	meImageH.ProxyURL = proxyURLBuilder
+	adminImageH.ProxyURL = proxyURLBuilder
 
 	mailSvc := mailer.New(mailer.Config{
 		Host:     cfg.SMTP.Host,

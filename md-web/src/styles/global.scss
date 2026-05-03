@@ -11,6 +11,7 @@
   --border: rgba(0, 0, 0, 0.06);
   --nav-bg: rgba(255, 255, 255, 0.82);
   --primary: #0071e3;
+  --primary-rgb: 0, 113, 227;
   --primary-soft: rgba(0, 113, 227, 0.08);
   --accent: #bf5af2;
   --green: #30d158;
@@ -32,6 +33,7 @@ html.dark {
   --border: rgba(255, 255, 255, 0.08);
   --nav-bg: rgba(0, 0, 0, 0.82);
   --primary-soft: rgba(0, 113, 227, 0.15);
+  --primary-rgb: 0, 113, 227;
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
   --shadow-md: 0 4px 20px rgba(0,0,0,0.3);
   --shadow-lg: 0 12px 40px rgba(0,0,0,0.4);
@@ -39,13 +41,21 @@ html.dark {
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
-    'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+    'Inter', 'PingFang SC', 'Noto Sans SC', 'Helvetica Neue', Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
-  line-height: 1.5;
+  line-height: 1.6;
+  font-size: 15px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
 }
+
+a { color: var(--primary); text-decoration: none; }
+code { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
+
+::selection { background: rgba(0,113,227,.2); }
 
 .gradient-text {
   background: linear-gradient(135deg, #0071e3 0%, #bf5af2 50%, #30d158 100%);
@@ -62,16 +72,42 @@ body {
 }
 
 /* Element Plus 覆盖 - 苹果风 */
+.el-button {
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
 .el-button--primary {
   --el-button-bg-color: var(--primary);
   --el-button-border-color: var(--primary);
   border-radius: 980px;
-  font-weight: 500;
-  letter-spacing: 0.01em;
+}
+.el-button--primary:not(.is-disabled):hover {
+  transform: scale(1.02);
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.3);
+}
+.el-button--primary:not(.is-disabled):active {
+  transform: scale(0.98);
 }
 .el-input__wrapper, .el-textarea__inner, .el-select__wrapper {
   border-radius: var(--radius-sm) !important;
+  box-shadow: 0 0 0 1px var(--border) inset !important;
+  background-color: var(--bg-soft) !important;
+  transition: all 0.2s ease !important;
+}
+.el-input__wrapper.is-focus, .el-textarea__inner:focus, .el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 2px var(--primary) inset !important;
+  background-color: var(--bg-card-solid) !important;
 }
 .el-dialog {
   border-radius: var(--radius) !important;
+  background: var(--bg-card-solid) !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+.el-slider__bar {
+  background-color: var(--primary) !important;
+}
+.el-slider__button {
+  border-color: var(--primary) !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15) !important;
 }

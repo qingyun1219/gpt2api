@@ -8,8 +8,9 @@ import App from './App.vue'
 import router from './router'
 import './styles/global.scss'
 
+const pinia = createPinia()
 const app = createApp(App)
-app.use(createPinia())
+app.use(pinia)
 app.use(router)
 app.use(ElementPlus, { size: 'default' })
 

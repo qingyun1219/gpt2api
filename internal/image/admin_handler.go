@@ -1,6 +1,7 @@
 package image
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -8,9 +9,13 @@ import (
 	"github.com/432539/gpt2api/pkg/resp"
 )
 
+// ImageProxyURLBuilder 生成代理 URL 的函数签名,由 gateway 包注入以避免循环引用。
+type ImageProxyURLBuilder func(taskID string, idx int) string
+
 // AdminHandler 管理员视角下的生成记录接口。
 type AdminHandler struct {
-	dao *DAO
+	dao      *DAO
+	ProxyURL ImageProxyURLBuilder
 }
 
 // NewAdminHandler 构造。
@@ -53,9 +58,19 @@ func (h *AdminHandler) List(c *gin.Context) {
 	}
 	out := make([]rowOut, 0, len(rows))
 	for _, r := range rows {
+		// 用代理 URL 替换上游原始签名 URL,避免过期/跨域/墙导致加载失败
+		rawURLs := r.DecodeResultURLs()
+		proxyURLs := make([]string, len(rawURLs))
+		for i := range rawURLs {
+			if h.ProxyURL != nil {
+				proxyURLs[i] = h.ProxyURL(r.TaskID, i)
+			} else {
+				proxyURLs[i] = fmt.Sprintf("/p/img/%s/%d", r.TaskID, i)
+			}
+		}
 		out = append(out, rowOut{
 			AdminTaskRow:     r,
-			ResultURLsParsed: r.DecodeResultURLs(),
+			ResultURLsParsed: proxyURLs,
 		})
 	}
 

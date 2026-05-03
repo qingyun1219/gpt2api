@@ -228,6 +228,10 @@ func (s *Scheduler) tryDispatchOnce(ctx context.Context, modelType string) (*Lea
 		}
 		lease, err := s.tryLock(ctx, acc)
 		if err == nil {
+			// throttled 账号冷却到期后被选中,自动恢复为 healthy
+			if acc.Status == account.StatusThrottled {
+				_ = s.accSvc.DAO().SetStatus(ctx, acc.ID, account.StatusHealthy, nil)
+			}
 			return lease, nil
 		}
 		if errors.Is(err, lock.ErrNotAcquired) {

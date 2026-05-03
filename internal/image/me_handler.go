@@ -2,6 +2,7 @@ package image
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -13,9 +14,10 @@ import (
 )
 
 // MeHandler 面向当前用户的图片任务只读接口(JWT 鉴权)。
-// 与 /v1/images/tasks/:id(API Key 鉴权)共享同一张 image_tasks 表,
-// 只是入口改到 /api/me/images/* 便于前端面板调用。
-type MeHandler struct{ dao *DAO }
+type MeHandler struct {
+	dao      *DAO
+	ProxyURL ImageProxyURLBuilder
+}
 
 // NewMeHandler 构造。
 func NewMeHandler(dao *DAO) *MeHandler { return &MeHandler{dao: dao} }
@@ -42,8 +44,16 @@ type taskView struct {
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 }
 
-func toView(t *Task) taskView {
-	urls := t.DecodeResultURLs()
+func (h *MeHandler) toView(t *Task) taskView {
+	rawURLs := t.DecodeResultURLs()
+	proxyURLs := make([]string, len(rawURLs))
+	for i := range rawURLs {
+		if h.ProxyURL != nil {
+			proxyURLs[i] = h.ProxyURL(t.TaskID, i)
+		} else {
+			proxyURLs[i] = fmt.Sprintf("/p/img/%s/%d", t.TaskID, i)
+		}
+	}
 	fids := t.DecodeFileIDs()
 	for i, id := range fids {
 		fids[i] = strings.TrimPrefix(id, "sed:")
@@ -53,7 +63,7 @@ func toView(t *Task) taskView {
 		AccountID: t.AccountID, Prompt: t.Prompt, N: t.N, Size: t.Size,
 		Upscale: t.Upscale,
 		Status: t.Status, ConversationID: t.ConversationID, Error: t.Error,
-		CreditCost: t.CreditCost, ImageURLs: urls, FileIDs: fids,
+		CreditCost: t.CreditCost, ImageURLs: proxyURLs, FileIDs: fids,
 		CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, FinishedAt: t.FinishedAt,
 	}
 }
@@ -84,7 +94,7 @@ func (h *MeHandler) List(c *gin.Context) {
 	}
 	items := make([]taskView, 0, len(tasks))
 	for i := range tasks {
-		items = append(items, toView(&tasks[i]))
+		items = append(items, h.toView(&tasks[i]))
 	}
 	resp.OK(c, gin.H{"items": items, "limit": limit, "offset": offset})
 }
@@ -114,5 +124,5 @@ func (h *MeHandler) Get(c *gin.Context) {
 		resp.Fail(c, 40400, "task not found")
 		return
 	}
-	resp.OK(c, toView(t))
+	resp.OK(c, h.toView(t))
 }

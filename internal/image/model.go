@@ -34,6 +34,7 @@ const (
 	ErrPOWFailed        = "pow_failed"
 	ErrTurnstile        = "turnstile_required"
 	ErrUpstream         = "upstream_error"
+	ErrContentPolicy    = "content_policy"     // 上游内容策略拒绝出图,不可重试
 	ErrPollTimeout      = "poll_timeout"
 	ErrDownload         = "download_failed"
 	ErrInvalidResponse  = "invalid_response"

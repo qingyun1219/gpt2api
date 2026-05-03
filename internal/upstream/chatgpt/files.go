@@ -35,6 +35,7 @@ import (
 	_ "image/jpeg" //
 	_ "image/png"  //
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -95,23 +96,22 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, fileName string) (
 		step1Body["width"] = out.Width
 	}
 	b1, _ := json.Marshal(step1Body)
-	req1, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.opts.BaseURL+"/backend-api/files",
-		bytes.NewReader(b1))
+	buf1, status1, err := c.doUploadStep(ctx, "create file", func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			c.opts.BaseURL+"/backend-api/files", bytes.NewReader(b1))
+		if err != nil {
+			return nil, err
+		}
+		c.commonHeaders(req)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	c.commonHeaders(req1)
-	req1.Header.Set("Content-Type", "application/json")
-	req1.Header.Set("Accept", "application/json")
-	res1, err := c.hc.Do(req1)
-	if err != nil {
-		return nil, fmt.Errorf("create file: %w", err)
-	}
-	defer res1.Body.Close()
-	buf1, _ := io.ReadAll(res1.Body)
-	if res1.StatusCode >= 400 {
-		return nil, &UpstreamError{Status: res1.StatusCode, Message: "create file failed", Body: string(buf1)}
+	if status1 >= 400 {
+		return nil, &UpstreamError{Status: status1, Message: "create file failed", Body: string(buf1)}
 	}
 	var step1Resp struct {
 		FileID    string `json:"file_id"`
@@ -135,47 +135,48 @@ func (c *Client) UploadFile(ctx context.Context, data []byte, fileName string) (
 	}
 
 	// ---- Step 2: PUT upload_url (Azure Blob) ----
-	req2, err := http.NewRequestWithContext(ctx, http.MethodPut, step1Resp.UploadURL, bytes.NewReader(data))
+	// SAS URL 的 PUT 是覆盖语义,重试任意次都安全。
+	_, status2, err := c.doUploadStep(ctx, "upload PUT", func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+			step1Resp.UploadURL, bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", mime)
+		req.Header.Set("x-ms-blob-type", "BlockBlob")
+		req.Header.Set("x-ms-version", "2020-04-08")
+		req.Header.Set("Origin", c.opts.BaseURL)
+		req.Header.Set("User-Agent", c.opts.UserAgent)
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.8")
+		req.Header.Set("Referer", c.opts.BaseURL+"/")
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	req2.Header.Set("Content-Type", mime)
-	req2.Header.Set("x-ms-blob-type", "BlockBlob")
-	req2.Header.Set("x-ms-version", "2020-04-08")
-	req2.Header.Set("Origin", c.opts.BaseURL)
-	req2.Header.Set("User-Agent", c.opts.UserAgent)
-	req2.Header.Set("Accept", "application/json, text/plain, */*")
-	req2.Header.Set("Accept-Language", "en-US,en;q=0.8")
-	req2.Header.Set("Referer", c.opts.BaseURL+"/")
-	res2, err := c.hc.Do(req2)
-	if err != nil {
-		return nil, fmt.Errorf("upload PUT: %w", err)
+	if status2 >= 400 {
+		return nil, &UpstreamError{Status: status2, Message: "upload PUT failed"}
 	}
-	defer res2.Body.Close()
-	if res2.StatusCode >= 400 {
-		buf2, _ := io.ReadAll(res2.Body)
-		return nil, &UpstreamError{Status: res2.StatusCode, Message: "upload PUT failed", Body: string(buf2)}
-	}
-	_, _ = io.Copy(io.Discard, res2.Body)
 
 	// ---- Step 3: POST /backend-api/files/{file_id}/uploaded ----
-	req3, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.opts.BaseURL+"/backend-api/files/"+step1Resp.FileID+"/uploaded",
-		strings.NewReader("{}"))
+	buf3, status3, err := c.doUploadStep(ctx, "register uploaded", func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			c.opts.BaseURL+"/backend-api/files/"+step1Resp.FileID+"/uploaded",
+			strings.NewReader("{}"))
+		if err != nil {
+			return nil, err
+		}
+		c.commonHeaders(req)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	c.commonHeaders(req3)
-	req3.Header.Set("Content-Type", "application/json")
-	req3.Header.Set("Accept", "application/json")
-	res3, err := c.hc.Do(req3)
-	if err != nil {
-		return nil, fmt.Errorf("register uploaded: %w", err)
-	}
-	defer res3.Body.Close()
-	buf3, _ := io.ReadAll(res3.Body)
-	if res3.StatusCode >= 400 {
-		return nil, &UpstreamError{Status: res3.StatusCode, Message: "register uploaded failed", Body: string(buf3)}
+	if status3 >= 400 {
+		return nil, &UpstreamError{Status: status3, Message: "register uploaded failed", Body: string(buf3)}
 	}
 	var step3Resp struct {
 		Status      string `json:"status"`
@@ -262,4 +263,80 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// doUploadStep 执行一次带重试的 HTTP 调用。
+//
+// 把请求构造放到回调里,每次重试都 build 一个新 *http.Request(避免 body 被消费过)。
+// 仅对"瞬时网络错误"和 5xx 重试,4xx 业务错误立刻退出。
+// 退避序列 0 / 0.5s / 1.5s / 3s,共 4 次尝试;ctx 取消则不再等待。
+func (c *Client) doUploadStep(
+	ctx context.Context,
+	label string,
+	build func() (*http.Request, error),
+) ([]byte, int, error) {
+	const maxAttempts = 4
+	backoffs := []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(backoffs[attempt]):
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			}
+		}
+
+		req, err := build()
+		if err != nil {
+			return nil, 0, err
+		}
+
+		resp, doErr := c.hc.Do(req)
+		if doErr != nil {
+			lastErr = fmt.Errorf("%s: %w", label, doErr)
+			if !isTransientNetErr(doErr) || ctx.Err() != nil {
+				return nil, 0, lastErr
+			}
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 500 && attempt < maxAttempts-1 {
+			lastErr = fmt.Errorf("%s http=%d", label, resp.StatusCode)
+			continue
+		}
+		return body, resp.StatusCode, nil
+	}
+	return nil, 0, lastErr
+}
+
+// isTransientNetErr 判断错误是不是值得重试的"瞬时网络故障"。
+func isTransientNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	s := err.Error()
+	for _, kw := range []string{
+		"EOF", "connection reset", "connection refused", "broken pipe",
+		"no route to host", "network is unreachable",
+		"TLS handshake", "tls: handshake", "utls handshake",
+		"i/o timeout", "unexpected EOF", "server closed connection",
+		"use of closed network connection",
+	} {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return false
 }

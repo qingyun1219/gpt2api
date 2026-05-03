@@ -68,11 +68,9 @@ type ImageGenRequest struct {
 	ResponseFormat  string   `json:"response_format,omitempty"` // url | b64_json,默认 url
 	User            string   `json:"user,omitempty"`
 	ReferenceImages []string `json:"reference_images,omitempty"` // 非标准扩展,见注释
-	// Upscale 非标准扩展:控制"本服务对原图做本地高清放大"的目标档位。
-	// 可选值:""(原图直出,默认)/ "2k"(长边 2560) / "4k"(长边 3840)。
-	// 算法:golang.org/x/image/draw.CatmullRom(传统插值,不是 AI 超分)。
-	// 生效时机:图片代理 URL 首次请求时做一次 decode+放大+PNG 编码,之后进程内
-	// LRU 缓存命中毫秒级返回。仅影响 /v1/images/proxy/... 的出口字节,不改原图。
+	// Wait 控制同步/异步模式。默认 true(同步阻塞直到完成);
+	// 设为 false 则立即返回 task_id,客户端通过 GET /v1/images/tasks/:id 轮询结果。
+	Wait    *bool  `json:"wait,omitempty"`
 	Upscale string `json:"upscale,omitempty"`
 }
 
@@ -243,21 +241,10 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		return
 	}
 
-	// 5) 执行(同步阻塞)
-	//
-	// 单请求硬上限 7 分钟:Runner 默认 per-attempt 6 分钟
-	// (SSE ~60s + PollMaxWait 300s + 缓冲),外层再留 1 分钟
-	// 给账号调度 + 签名 URL 换取等周边耗时。IMG2 已正式上线,不再做 preview_only 重试。
-	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
-	defer cancel()
-
-	// 带参考图时,多轮重试没什么意义(反而会重复上传参考图),只留 1 次尝试。
+	// 图生图也允许换账号重试一次(上游 poll error 时有一定概率换号就好)
 	maxAttempts := 2
-	if len(refs) > 0 {
-		maxAttempts = 1
-	}
 
-	res := h.Runner.Run(runCtx, image.RunOptions{
+	runOpt := image.RunOptions{
 		TaskID:        taskID,
 		UserID:        ak.UserID,
 		KeyID:         ak.ID,
@@ -267,7 +254,44 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		N:             req.N,
 		MaxAttempts:   maxAttempts,
 		References:    refs,
-	})
+	}
+
+	// ---- 异步模式:wait=false 立即返回 task_id,后台 goroutine 继续跑 ----
+	if req.Wait != nil && !*req.Wait {
+		rec.Status = usage.StatusSuccess // 异步提交本身算成功
+		c.JSON(http.StatusAccepted, gin.H{
+			"task_id": taskID,
+			"status":  image.StatusDispatched,
+			"message": "任务已提交,请通过 GET /v1/images/tasks/" + taskID + " 查询结果",
+		})
+		// 后台执行:独立 goroutine + 独立 context(不依赖 HTTP 请求的生命周期)
+		go func() {
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 7*time.Minute)
+			defer bgCancel()
+			res := h.Runner.Run(bgCtx, runOpt)
+			if res.Status == image.StatusSuccess {
+				if cost > 0 {
+					_ = h.Billing.Settle(context.Background(), ak.UserID, ak.ID, cost, cost, refID, "image settle (async)")
+				}
+				_ = h.Keys.DAO().TouchUsage(context.Background(), ak.ID, c.ClientIP(), cost)
+				if h.DAO != nil {
+					_ = h.DAO.UpdateCost(context.Background(), taskID, cost)
+				}
+			} else {
+				// 失败退款
+				if cost > 0 {
+					_ = h.Billing.Refund(context.Background(), ak.UserID, ak.ID, cost, refID, "image refund (async)")
+				}
+			}
+		}()
+		return
+	}
+
+	// ---- 同步模式(默认):阻塞等待完成 ----
+	runCtx, cancel := context.WithTimeout(c.Request.Context(), 7*time.Minute)
+	defer cancel()
+
+	res := h.Runner.Run(runCtx, runOpt)
 	rec.AccountID = res.AccountID
 
 	if res.Status != image.StatusSuccess {
@@ -307,6 +331,7 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 		TaskID:  taskID,
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
+	successCount := 0
 	for i, signedURL := range res.SignedURLs {
 		d := ImageGenData{}
 		if i < len(res.FileIDs) {
@@ -318,8 +343,16 @@ func (h *ImagesHandler) ImageGenerations(c *gin.Context) {
 				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
 		} else {
 			d.B64JSON = b64
+			successCount++
 		}
 		out.Data = append(out.Data, d)
+	}
+	// 所有图片下载都失败时,退款并返回错误,避免 NewAPI 等上游误扣费
+	if successCount == 0 && len(res.SignedURLs) > 0 {
+		refund("download_failed")
+		openAIError(c, http.StatusBadGateway, "download_failed",
+			"图片生成成功但下载失败,已自动退款,请重试")
+		return
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -501,12 +534,10 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 	rec.CreditCost = cost
 	rec.DurationMs = int(time.Since(startAt).Milliseconds())
 
-	// 直接返回 images 标准格式(b64_json),不走 chat markdown 内嵌。
-	out := ImageGenResponse{
-		Created: time.Now().Unix(),
-		TaskID:  taskID,
-		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
-	}
+	// 下载图片并编码 base64
+	var contentParts []string
+	var imageData []ImageGenData
+	successCount := 0
 	for i, signedURL := range res.SignedURLs {
 		d := ImageGenData{}
 		if i < len(res.FileIDs) {
@@ -518,10 +549,49 @@ func (h *ImagesHandler) handleChatAsImage(c *gin.Context, rec *usage.Log, ak *ap
 				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
 		} else {
 			d.B64JSON = b64
+			contentParts = append(contentParts, fmt.Sprintf("![image_%d](data:image/png;base64,%s)", i, b64))
+			successCount++
 		}
-		out.Data = append(out.Data, d)
+		imageData = append(imageData, d)
 	}
-	c.JSON(http.StatusOK, out)
+	if successCount == 0 && len(res.SignedURLs) > 0 {
+		refund("download_failed")
+		openAIError(c, http.StatusBadGateway, "download_failed",
+			"图片生成成功但下载失败,已自动退款,请重试")
+		return
+	}
+
+	// 返回标准 ChatCompletionResponse 格式(让 NewAPI 等上游正确解析 usage/扣费),
+	// 同时附带 data 字段(向后兼容老客户按 ImageGenResponse 解析的场景)。
+	content := strings.Join(contentParts, "\n\n")
+	promptTokens := len(prompt) / 4
+	if promptTokens < 1 {
+		promptTokens = 1
+	}
+	completionTokens := successCount
+
+	id := "chatcmpl-img-" + taskID
+	finishReason := "stop"
+	c.JSON(http.StatusOK, gin.H{
+		// ---- 标准 ChatCompletionResponse 字段(NewAPI / OpenAI SDK 可解析) ----
+		"id":      id,
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   m.Slug,
+		"choices": []ChatCompletionChoice{{
+			Index:        0,
+			Message:      chatgpt.ChatMessage{Role: "assistant", Content: content},
+			FinishReason: finishReason,
+		}},
+		"usage": ChatCompletionUsage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
+		// ---- 向后兼容:老客户仍可按 data[].b64_json 取图 ----
+		"task_id": taskID,
+		"data":    imageData,
+	})
 }
 
 // extractLastUserPrompt 从 messages 中拿最后一条 user 消息的 content。
@@ -556,6 +626,12 @@ func localizeImageErr(code, raw string) string {
 		zh = "图片生成失败"
 	case "upstream_error":
 		zh = "上游返回错误"
+	case image.ErrContentPolicy:
+		// 直接返回上游原文，不再包装
+		if raw != "" {
+			return raw
+		}
+		zh = "上游内容策略拒绝生成此图片"
 	default:
 		zh = "图片生成失败(" + code + ")"
 	}
@@ -815,6 +891,7 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 		TaskID:  taskID,
 		Data:    make([]ImageGenData, 0, len(res.SignedURLs)),
 	}
+	successCount := 0
 	for i, signedURL := range res.SignedURLs {
 		d := ImageGenData{}
 		if i < len(res.FileIDs) {
@@ -826,8 +903,15 @@ func (h *ImagesHandler) ImageEdits(c *gin.Context) {
 				zap.Error(err), zap.String("task_id", taskID), zap.Int("idx", i))
 		} else {
 			d.B64JSON = b64
+			successCount++
 		}
 		out.Data = append(out.Data, d)
+	}
+	if successCount == 0 && len(res.SignedURLs) > 0 {
+		refund("download_failed")
+		openAIError(c, http.StatusBadGateway, "download_failed",
+			"图片生成成功但下载失败,已自动退款,请重试")
+		return
 	}
 	c.JSON(http.StatusOK, out)
 }

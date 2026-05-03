@@ -140,7 +140,8 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 				break
 			}
 			retryable := status == ErrRateLimited || status == ErrNoAccount ||
-				status == ErrAuthRequired || status == ErrNetworkTransient
+				status == ErrAuthRequired || status == ErrNetworkTransient ||
+				status == ErrUpstream || status == ErrPollTimeout
 			if !retryable {
 				break
 			}
@@ -302,11 +303,19 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		return false, ErrUnknown, fmt.Errorf("chatgpt client: %w", err)
 	}
 
-	// 3) ChatRequirements + POW(新两步 sentinel 流程,solver 未配置时内部自动
-	// 回退到单步接口)
+	// 3) ChatRequirements + POW
 	cr, err := cli.ChatRequirementsV2(ctx)
 	if err != nil {
-		return false, r.classifyUpstream(err), err
+		code := r.classifyUpstream(err)
+		// 401 鉴权失败 → 账号 token 过期,标记 warned 让调度器短期不再选它
+		if code == ErrAuthRequired {
+			logger.L().Warn("image account auth failed, marking warned",
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("task_id", opt.TaskID),
+				zap.Error(err))
+			r.sched.MarkWarned(context.Background(), lease.Account.ID)
+		}
+		return false, code, err
 	}
 	var proofToken string
 	if cr.Proofofwork.Required {
@@ -340,10 +349,14 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// 会通过 f/conversation 的 payload 字段传达。
 
 	// 4.5) 图生图:上传参考图。任何一张失败都直接整体 fail(上游后续会对不上 attachment)。
+	//
+	// 超时预算:UploadFile 内部对网络层瞬时错误重试 4 次(0+0.5+1.5+3=5s 退避总和),
+	// 三步串行各自最多耗时 30s 上下,叠加重试时单张图最坏 ≈ 3*(30s+5s) = 105s。
+	// 给 180s 留一点余量;如果还是超时,说明根本不是瞬时问题,fail-fast 也合理。
 	var refs []*chatgpt.UploadedFile
 	if len(opt.References) > 0 {
 		for idx, r0 := range opt.References {
-			upCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			upCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
 			up, err := cli.UploadFile(upCtx, r0.Data, r0.FileName)
 			cancel()
 			if err != nil {
@@ -409,6 +422,11 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		code := r.classifyUpstream(err)
 		if code == ErrRateLimited {
 			r.sched.MarkRateLimited(context.Background(), lease.Account.ID)
+		} else if code == ErrAuthRequired {
+			logger.L().Warn("image account SSE auth failed, marking warned",
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("task_id", opt.TaskID))
+			r.sched.MarkWarned(context.Background(), lease.Account.ID)
 		}
 		return false, code, err
 	}
@@ -428,7 +446,12 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		zap.Strings("sse_fids_list", sseResult.FileIDs),
 		zap.Int("sse_sids", len(sseResult.SedimentIDs)),
 		zap.Strings("sse_sids_list", sseResult.SedimentIDs),
+		zap.String("assistant_text", truncate(sseResult.AssistantText, 200)),
 	)
+
+	// 注意：图片生成场景下 SSE 通常只返回 conversation_id + image_gen_task_id，
+	// 图片引用(file-service / sediment)要在后续 poll 阶段才能拿到。
+	// 因此这里 noRefs 是正常的，不能在此短路。
 
 	// 聚合 SSE 阶段的所有引用:file-service 优先,sediment 补位
 	var fileRefs []string
@@ -454,32 +477,33 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 			ExpectedN: opt.N,
 			MaxWait:   opt.PollMaxWait,
 		}
-		status, fids, sids := cli.PollConversationForImages(ctx, convID, pollOpt)
+		poll := cli.PollConversationForImages(ctx, convID, pollOpt)
 		logger.L().Info("image runner poll done",
 			zap.String("task_id", opt.TaskID),
 			zap.Uint64("account_id", lease.Account.ID),
 			zap.String("conv_id", convID),
-			zap.String("poll_status", string(status)),
-			zap.Int("poll_fids", len(fids)),
-			zap.Strings("poll_fids_list", fids),
-			zap.Int("poll_sids", len(sids)),
-			zap.Strings("poll_sids_list", sids),
+			zap.String("poll_status", string(poll.Status)),
+			zap.String("poll_detail", poll.ErrorDetail),
+			zap.Int("poll_fids", len(poll.FileIDs)),
+			zap.Strings("poll_fids_list", poll.FileIDs),
+			zap.Int("poll_sids", len(poll.SedimentIDs)),
+			zap.Strings("poll_sids_list", poll.SedimentIDs),
 		)
-		switch status {
+		switch poll.Status {
 		case chatgpt.PollStatusSuccess:
-			// 去重合并:SSE 捕获的 sediment 可能在 mapping 里再被 Poll 扫一次
+			// 去重合并
 			seen := make(map[string]struct{}, len(fileRefs))
 			for _, r := range fileRefs {
 				seen[r] = struct{}{}
 			}
-			for _, f := range fids {
+			for _, f := range poll.FileIDs {
 				if _, ok := seen[f]; ok {
 					continue
 				}
 				seen[f] = struct{}{}
 				fileRefs = append(fileRefs, f)
 			}
-			for _, s := range sids {
+			for _, s := range poll.SedimentIDs {
 				key := "sed:" + s
 				if _, ok := seen[key]; ok {
 					continue
@@ -488,9 +512,42 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 				fileRefs = append(fileRefs, key)
 			}
 		case chatgpt.PollStatusTimeout:
-			return false, ErrPollTimeout, errors.New("poll timeout without any image")
+			return false, ErrPollTimeout, fmt.Errorf("poll timeout: %s", poll.ErrorDetail)
 		default:
-			return false, ErrUpstream, errors.New("poll error")
+			// 检查是否为上游内容策略拒绝（不可重试）——
+			// poll 检测到 assistant 纯文本拒绝时 ErrorDetail 就是上游原文
+			if !strings.Contains(poll.ErrorDetail, "429") &&
+				!strings.Contains(poll.ErrorDetail, "context canceled") {
+				logger.L().Warn("image poll: upstream refusal detected",
+					zap.Uint64("account_id", lease.Account.ID),
+					zap.String("task_id", opt.TaskID),
+					zap.String("detail", poll.ErrorDetail))
+				return false, ErrContentPolicy, fmt.Errorf("%s", poll.ErrorDetail)
+			}
+			// poll error — 只打日志,不标记账号状态
+			logger.L().Warn("image poll error, will retry with another account",
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("task_id", opt.TaskID),
+				zap.String("detail", poll.ErrorDetail))
+			return false, ErrUpstream, fmt.Errorf("poll error: %s", poll.ErrorDetail)
+		}
+	}
+
+	// 图生图:ParseImageSSE 用正则扫整段 SSE,会把 user 消息里「参考图」的
+	// file-service:// 指纹和 assistant 的出图一起扫进 FileIDs,且参考图往往先出现,
+	// 导致返回的 /p/img/.../0 实际下载的是上传图而非结果图。
+	// 轮询路径 ExtractImageToolMsgs 只收 async_task_type=image_gen 的 tool,不含参考图;
+	// 这里对合并后的 fileRefs 做一层差集即可。
+	if len(refs) > 0 {
+		refSet := referenceUploadFileIDSet(refs)
+		if len(refSet) > 0 {
+			n0 := len(fileRefs)
+			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
+			if n0 != len(fileRefs) {
+				logger.L().Info("image runner stripped reference file_ids from SSE-captured refs",
+					zap.String("task_id", opt.TaskID),
+					zap.Int("before", n0), zap.Int("after", len(fileRefs)))
+			}
 		}
 	}
 
@@ -563,3 +620,40 @@ func (r *Runner) classifyUpstream(err error) string {
 func GenerateTaskID() string {
 	return "img_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:24]
 }
+
+// referenceUploadFileIDSet 收集图生图时 UploadFile 返回的 file_id(纯 file-service id,无 sed: 前缀)。
+func referenceUploadFileIDSet(refs []*chatgpt.UploadedFile) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, u := range refs {
+		if u == nil {
+			continue
+		}
+		id := strings.TrimSpace(u.FileID)
+		if id == "" {
+			continue
+		}
+		out[strings.TrimPrefix(id, "sed:")] = struct{}{}
+	}
+	return out
+}
+
+// filterOutReferenceFileIDs 从合并后的 fileRefs 中移除与「用户参考上传」同 id 的 file-service 条目,
+// 保留 sediment(sed:...) —— 参考图只走 file-service,不会以 sed: 形式出现在同一列表里和生成图冲突。
+func filterOutReferenceFileIDs(fileRefs []string, refSet map[string]struct{}) []string {
+	if len(refSet) == 0 {
+		return fileRefs
+	}
+	out := make([]string, 0, len(fileRefs))
+	for _, ref := range fileRefs {
+		if strings.HasPrefix(ref, "sed:") {
+			out = append(out, ref)
+			continue
+		}
+		if _, skip := refSet[ref]; skip {
+			continue
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+

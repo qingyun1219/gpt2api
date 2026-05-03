@@ -95,3 +95,6 @@ Thumbs.db
 /md-web/node_modules/
 /md-web/dist/
 /md-web/build*.log
+/*.json
+/aug-api/
+/*.zip

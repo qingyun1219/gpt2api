@@ -1,5 +1,55 @@
 import { useConfigStore } from '@/stores/config'
 
+/** 错误码 → 中文提示映射 */
+const ERROR_LABELS: Record<string, string> = {
+  no_available_account: '账号池暂无可用账号，请稍后重试',
+  rate_limited: '请求过于频繁，请稍后再试',
+  rate_limit_rpm: '触发每分钟请求数限制，请稍后再试',
+  insufficient_balance: '积分不足，请充值后再试',
+  billing_error: '计费系统异常',
+  model_not_allowed: '当前 API Key 无权调用该模型',
+  model_not_found: '模型不存在或已下架',
+  upstream_error: '上游服务返回错误，请重试',
+  poll_timeout: '图片生成超时，请重试',
+  network_transient: '网络波动，请重试',
+  pow_timeout: 'POW 验证超时，请重试',
+  pow_failed: 'POW 验证失败，请重试',
+  turnstile_required: '需要验证码，请重试',
+  download_failed: '图片下载失败，请重试',
+  invalid_response: '上游返回数据异常，请重试',
+  auth_required: '账号鉴权失败，请重试',
+  content_policy: '内容策略限制，该提示词被上游拒绝生成',
+  unknown: '图片生成失败，请重试',
+  image_not_wired: '图片能力未开启，请联系管理员',
+  invalid_request_error: '请求参数有误',
+  invalid_reference_image: '参考图解析失败，请检查图片格式',
+}
+
+/** 解析后端 OpenAI 格式的错误响应，返回人类可读的错误信息 */
+function parseApiError(status: number, body: string): string {
+  try {
+    const obj = JSON.parse(body)
+    const err = obj?.error
+    if (err) {
+      const code = err.code || err.type || ''
+      const msg = err.message || ''
+      // content_policy: 直接显示上游原文
+      if (code === 'content_policy' && msg) return msg
+      // 优先用中文映射
+      const zh = ERROR_LABELS[code]
+      if (zh) return zh + (msg && !msg.startsWith(zh) ? `（${msg}）` : '')
+      // 后端 localizeImageErr 已经返回中文 message 的情况
+      if (msg) return msg
+    }
+  } catch { /* 非 JSON */ }
+  // 兜底
+  if (status === 402) return '积分不足，请充值后再试'
+  if (status === 429) return '请求过于频繁，请稍后再试'
+  if (status === 503) return '服务暂时不可用，请稍后重试'
+  if (status === 502) return '图片生成失败，请重试'
+  return `请求失败 (HTTP ${status})`
+}
+
 function headers() {
   const config = useConfigStore()
   return {
@@ -49,7 +99,7 @@ export async function generateImage(
   })
   if (!resp.ok) {
     const e = await resp.text()
-    throw new Error(`HTTP ${resp.status}: ${e}`)
+    throw new Error(parseApiError(resp.status, e))
   }
   const data = await resp.json()
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
@@ -83,7 +133,7 @@ export async function editImage(
   })
   if (!resp.ok) {
     const e = await resp.text()
-    throw new Error(`HTTP ${resp.status}: ${e}`)
+    throw new Error(parseApiError(resp.status, e))
   }
   const data = await resp.json()
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
@@ -103,7 +153,7 @@ export async function generateGemini(
   })
   if (!resp.ok) {
     const e = await resp.text()
-    throw new Error(`HTTP ${resp.status}: ${e}`)
+    throw new Error(parseApiError(resp.status, e))
   }
   const data = await resp.json()
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))

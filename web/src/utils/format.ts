@@ -100,6 +100,7 @@ const ERROR_CODE_LABEL: Record<string, string> = {
   upstream_error: '上游服务返回错误',
   upstream_timeout: '上游响应超时',
   upstream_unavailable: '上游暂不可用',
+  content_policy: '上游内容策略拒绝生成',
   account_exhausted: '账号池暂无可用账号,请稍后重试',
   account_cooldown: '账号冷却中,请稍后重试',
   proxy_unhealthy: '代理不健康',

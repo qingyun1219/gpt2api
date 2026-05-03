@@ -305,6 +305,7 @@ type ImageSSEResult struct {
 	SedimentIDs    []string // sediment:// 引用(通常是预览,需要轮询)
 	FinishType     string   // finish_details.type(interrupted/stop/...)
 	ImageGenTaskID string
+	AssistantText  string // assistant 纯文本回复(拒绝出图时会有内容)
 }
 
 var (
@@ -362,6 +363,20 @@ func ParseImageSSE(stream <-chan SSEEvent) ImageSSEResult {
 					if fd, ok := meta["finish_details"].(map[string]interface{}); ok {
 						if ft, ok := fd["type"].(string); ok {
 							r.FinishType = ft
+						}
+					}
+				}
+				// 提取 assistant 的纯文本回复(拒绝出图时此处有内容)
+				if author, ok := msg["author"].(map[string]interface{}); ok {
+					if role, _ := author["role"].(string); role == "assistant" {
+						if content, ok := msg["content"].(map[string]interface{}); ok {
+							if parts, ok := content["parts"].([]interface{}); ok {
+								for _, p := range parts {
+									if s, ok := p.(string); ok && s != "" {
+										r.AssistantText += s
+									}
+								}
+							}
 						}
 					}
 				}
@@ -513,11 +528,19 @@ const (
 	PollStatusError   PollStatus = "error"   // 上游错误(429 熔断 / ctx 取消)
 )
 
+// PollResult 是 PollConversationForImages 的详细返回。
+type PollResult struct {
+	Status      PollStatus
+	FileIDs     []string
+	SedimentIDs []string
+	ErrorDetail string // 上游错误详情(429 熔断 / ctx 取消 / 其它)
+}
+
 // PollConversationForImages 轮询会话直到图片可用。
 //
 // 返回 (status, file_ids, sediment_ids)。status=success 时 file_ids/sediment_ids 至少一个非空。
 // file-service 优先(优先级更高),sediment 作为补充一并带出,调用方自行决定用几张。
-func (c *Client) PollConversationForImages(ctx context.Context, convID string, opt PollOpts) (PollStatus, []string, []string) {
+func (c *Client) PollConversationForImages(ctx context.Context, convID string, opt PollOpts) PollResult {
 	if opt.ExpectedN <= 0 {
 		opt.ExpectedN = 1
 	}
@@ -531,19 +554,19 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 
 	deadline := time.Now().Add(opt.MaxWait)
 
-	// 累计全程看到的 fid/sid,循环外可用(超时兜底:有图就算成功)
 	var (
 		allFile        []string
 		allSed         []string
 		seenFile       = map[string]struct{}{}
 		seenSed        = map[string]struct{}{}
 		consecutive429 int
+		lastErr        string
 	)
 
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			return PollStatusError, nil, nil
+			return PollResult{Status: PollStatusError, ErrorDetail: "context canceled: " + ctx.Err().Error()}
 		default:
 		}
 
@@ -552,18 +575,19 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 			if ue, ok := err.(*UpstreamError); ok && ue.Status == 429 {
 				consecutive429++
 				if consecutive429 >= 3 {
-					return PollStatusError, nil, nil
+					return PollResult{Status: PollStatusError, ErrorDetail: fmt.Sprintf("consecutive 429 (%d times)", consecutive429)}
 				}
 				sleep(ctx, 10*time.Second)
 				continue
 			}
+			lastErr = err.Error()
 			sleep(ctx, opt.Interval)
 			continue
 		}
 		consecutive429 = 0
+		lastErr = ""
 
 		msgs := ExtractImageToolMsgs(mapping)
-		// baseline diff:只看本回合新增 tool 消息
 		var newMsgs []ImageToolMsg
 		if len(baseline) > 0 {
 			for _, m := range msgs {
@@ -575,8 +599,6 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 			newMsgs = msgs
 		}
 
-		// 跨 tool 消息聚合 fid/sid。IMG2 一次调用可能先出 sediment 预览再补
-		// file-service 终稿,或同一条消息里带 N 张 file id;这里都累计起来。
 		for _, m := range newMsgs {
 			for _, f := range m.FileIDs {
 				if _, ok := seenFile[f]; !ok {
@@ -592,19 +614,27 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 			}
 		}
 
-		// 够 N 张立即短路返回(file-service 优先占配额,sediment 补位)
 		if len(allFile)+len(allSed) >= opt.ExpectedN {
-			return PollStatusSuccess, allFile, allSed
+			return PollResult{Status: PollStatusSuccess, FileIDs: allFile, SedimentIDs: allSed}
+		}
+
+		// 检测上游拒绝出图：tool 消息存在但没有图片引用 + assistant 有纯文本拒绝
+		if refusal := extractAssistantRefusal(mapping); refusal != "" {
+			return PollResult{Status: PollStatusError, ErrorDetail: refusal}
 		}
 
 		sleep(ctx, opt.Interval)
 	}
 
-	// 超时兜底:只要拿到过至少 1 张,就算成功(速度优先,不等齐 N)
+	// 超时兜底
 	if len(allFile)+len(allSed) > 0 {
-		return PollStatusSuccess, allFile, allSed
+		return PollResult{Status: PollStatusSuccess, FileIDs: allFile, SedimentIDs: allSed}
 	}
-	return PollStatusTimeout, nil, nil
+	detail := "no image produced within deadline"
+	if lastErr != "" {
+		detail += "; last upstream error: " + lastErr
+	}
+	return PollResult{Status: PollStatusTimeout, ErrorDetail: detail}
 }
 
 // getMappingRaw 拉 conversation 并返回 mapping。
@@ -618,6 +648,66 @@ func (c *Client) getMappingRaw(ctx context.Context, convID string) (map[string]i
 		mapping = map[string]interface{}{}
 	}
 	return mapping, nil
+}
+
+// 拒绝关键词（中英文）——匹配到任一即认为上游拒绝出图
+var refusalKeywords = []string{
+	"违反了关于",
+	"防护限制",
+	"内容政策",
+	"无法生成该图片",
+	"content policy",
+	"I can't generate",
+	"I'm unable to generate",
+	"I'm not able to generate",
+	"violates our",
+	"couldn't generate",
+}
+
+// extractAssistantRefusal 从 mapping 中检测上游是否拒绝出图。
+// 只通过关键词匹配 assistant 的纯文本回复，命中即返回原文。
+func extractAssistantRefusal(mapping map[string]interface{}) string {
+	for _, raw := range mapping {
+		node, _ := raw.(map[string]interface{})
+		if node == nil {
+			continue
+		}
+		msg, _ := node["message"].(map[string]interface{})
+		if msg == nil {
+			continue
+		}
+		author, _ := msg["author"].(map[string]interface{})
+		if author == nil {
+			continue
+		}
+		if role, _ := author["role"].(string); role != "assistant" {
+			continue
+		}
+		content, _ := msg["content"].(map[string]interface{})
+		if content == nil {
+			continue
+		}
+		ct, _ := content["content_type"].(string)
+		if ct != "text" {
+			continue
+		}
+		parts, _ := content["parts"].([]interface{})
+		var text string
+		for _, p := range parts {
+			if s, ok := p.(string); ok && s != "" {
+				text += s
+			}
+		}
+		if text == "" {
+			continue
+		}
+		for _, kw := range refusalKeywords {
+			if strings.Contains(text, kw) {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 // GetConversationHead 返回会话最新叶子消息 id(current_node),复用会话时做 parent_message_id。

@@ -7,7 +7,10 @@ export const useConfigStore = defineStore('config', () => {
     { label: '🇭🇰 香港节点', value: 'https://cc.jispul.com' },
   ]
 
-  const baseUrl = ref(localStorage.getItem('ai_node') || nodes[0].value)
+  // 如果 localStorage 缓存的地址不在 nodes 列表里，重置为默认值
+  const savedNode = localStorage.getItem('ai_node')
+  const validNode = savedNode && nodes.some(n => n.value === savedNode) ? savedNode : nodes[0].value
+  const baseUrl = ref(validNode)
   const apiKey = ref(localStorage.getItem('ai_key') || '')
   const dark = ref(localStorage.getItem('ai_dark') === '1')
 

@@ -105,21 +105,23 @@ func (d *DAO) List(ctx context.Context, status string, keyword string, offset, l
 	return rows, total, err
 }
 
-// ListDispatchable 调度器专用:返回 AT 有效且 cooldown 到期的候选账号。
+// ListDispatchable 调度器专用:返回 AT 有效且可参与调度的候选账号。
 //
-// 接受 status IN ('healthy', 'warned'):
+// 接受以下状态:
 //   - healthy: 正常
-//   - warned:  RT/ST 刷新失败但 AT 尚未到期,仍可继续出图直到 AT 过期
+//   - warned:  RT/ST 刷新失败但 AT 尚未到期,仍可继续出图
+//   - throttled: 限流冷却中,但 cooldown_until 已过期的可以恢复参与调度
 func (d *DAO) ListDispatchable(ctx context.Context, limit int) ([]*Account, error) {
 	rows := make([]*Account, 0, limit)
 	now := time.Now()
 	err := d.db.SelectContext(ctx, &rows,
 		`SELECT * FROM oai_accounts
-         WHERE deleted_at IS NULL AND status IN ('healthy', 'warned')
+         WHERE deleted_at IS NULL
+           AND status IN ('healthy', 'warned', 'throttled')
            AND (cooldown_until IS NULL OR cooldown_until <= ?)
            AND (token_expires_at IS NULL OR token_expires_at > ?)
          ORDER BY
-           CASE status WHEN 'healthy' THEN 0 ELSE 1 END,
+           CASE status WHEN 'healthy' THEN 0 WHEN 'warned' THEN 1 ELSE 2 END,
            CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END,
            last_used_at ASC
          LIMIT ?`, now, now, limit)
