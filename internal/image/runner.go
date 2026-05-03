@@ -460,6 +460,22 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
 
+	// 图生图:SSE 正则扫整段流,会把 user 消息里「参考图」的 file-service://
+	// 也扫进来,必须在判断"是否够数跳过 Poll"之前先剔除,否则参考图会被误算
+	// 为生成结果,导致跳过 Poll 后返回原图。
+	if len(refs) > 0 {
+		refSet := referenceUploadFileIDSet(refs)
+		if len(refSet) > 0 {
+			n0 := len(fileRefs)
+			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
+			if n0 != len(fileRefs) {
+				logger.L().Info("image runner stripped reference file_ids from SSE-captured refs",
+					zap.String("task_id", opt.TaskID),
+					zap.Int("before", n0), zap.Int("after", len(fileRefs)))
+			}
+		}
+	}
+
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
 	if len(fileRefs) >= opt.N {
 		logger.L().Info("image runner enough refs from SSE, skip polling",
@@ -533,21 +549,12 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		}
 	}
 
-	// 图生图:ParseImageSSE 用正则扫整段 SSE,会把 user 消息里「参考图」的
-	// file-service:// 指纹和 assistant 的出图一起扫进 FileIDs,且参考图往往先出现,
-	// 导致返回的 /p/img/.../0 实际下载的是上传图而非结果图。
-	// 轮询路径 ExtractImageToolMsgs 只收 async_task_type=image_gen 的 tool,不含参考图;
-	// 这里对合并后的 fileRefs 做一层差集即可。
+	// Poll 合并后也做一次过滤（poll 路径的 ExtractImageToolMsgs 本身不含参考图，
+	// 但 SSE 阶段残留的 fileRefs 可能还有，去重合并时又带进来了）
 	if len(refs) > 0 {
 		refSet := referenceUploadFileIDSet(refs)
 		if len(refSet) > 0 {
-			n0 := len(fileRefs)
 			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
-			if n0 != len(fileRefs) {
-				logger.L().Info("image runner stripped reference file_ids from SSE-captured refs",
-					zap.String("task_id", opt.TaskID),
-					zap.Int("before", n0), zap.Int("after", len(fileRefs)))
-			}
 		}
 	}
 
