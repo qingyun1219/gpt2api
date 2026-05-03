@@ -473,6 +473,23 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		fileRefs = append(fileRefs, "sed:"+s)
 	}
 
+	// 图生图:SSE 正则扫整段流,会把 user 消息里「参考图」的 file-service:// 和
+	// sediment:// 也扫进来。必须在「是否够数跳过 Poll」之前先剔除,
+	// 否则参考图会被误算为生成结果,导致跳过 Poll 后过滤为空报错。
+	// 本地测试验证：参考图确实以 sediment://same_file_id 形式出现在 SSE 里。
+	if len(refs) > 0 {
+		refSet := referenceUploadFileIDSet(refs)
+		if len(refSet) > 0 {
+			n0 := len(fileRefs)
+			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
+			if n0 != len(fileRefs) {
+				logger.L().Info("image runner stripped reference file_ids from SSE refs",
+					zap.String("task_id", opt.TaskID),
+					zap.Int("before", n0), zap.Int("after", len(fileRefs)))
+			}
+		}
+	}
+
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
 	if len(fileRefs) >= opt.N {
 		logger.L().Info("image runner enough refs from SSE, skip polling",
