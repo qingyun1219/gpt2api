@@ -465,14 +465,18 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// 为生成结果,导致跳过 Poll 后返回原图。
 	if len(refs) > 0 {
 		refSet := referenceUploadFileIDSet(refs)
+		logger.L().Info("image runner ref-filter debug",
+			zap.String("task_id", opt.TaskID),
+			zap.Int("refs_count", len(refs)),
+			zap.Any("refSet", refSet),
+			zap.Strings("fileRefs_before", fileRefs))
 		if len(refSet) > 0 {
 			n0 := len(fileRefs)
 			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
-			if n0 != len(fileRefs) {
-				logger.L().Info("image runner stripped reference file_ids from SSE-captured refs",
-					zap.String("task_id", opt.TaskID),
-					zap.Int("before", n0), zap.Int("after", len(fileRefs)))
-			}
+			logger.L().Info("image runner ref-filter result",
+				zap.String("task_id", opt.TaskID),
+				zap.Int("before", n0), zap.Int("after", len(fileRefs)),
+				zap.Strings("fileRefs_after", fileRefs))
 		}
 	}
 
