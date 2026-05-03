@@ -618,11 +618,6 @@ func (c *Client) PollConversationForImages(ctx context.Context, convID string, o
 			return PollResult{Status: PollStatusSuccess, FileIDs: allFile, SedimentIDs: allSed}
 		}
 
-		// 检测上游拒绝出图：tool 消息存在但没有图片引用 + assistant 有纯文本拒绝
-		if refusal := extractAssistantRefusal(mapping); refusal != "" {
-			return PollResult{Status: PollStatusError, ErrorDetail: refusal}
-		}
-
 		sleep(ctx, opt.Interval)
 	}
 
@@ -650,8 +645,8 @@ func (c *Client) getMappingRaw(ctx context.Context, convID string) (map[string]i
 	return mapping, nil
 }
 
-// 拒绝关键词（中英文）——匹配到任一即认为上游拒绝出图
-var refusalKeywords = []string{
+// RefusalKeywords 拒绝关键词（中英文）——匹配到任一即认为上游拒绝出图
+var RefusalKeywords = []string{
 	"违反了关于",
 	"防护限制",
 	"内容政策",
@@ -701,7 +696,7 @@ func extractAssistantRefusal(mapping map[string]interface{}) string {
 		if text == "" {
 			continue
 		}
-		for _, kw := range refusalKeywords {
+		for _, kw := range RefusalKeywords {
 			if strings.Contains(text, kw) {
 				return text
 			}

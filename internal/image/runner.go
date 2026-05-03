@@ -453,31 +453,24 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 	// 图片引用(file-service / sediment)要在后续 poll 阶段才能拿到。
 	// 因此这里 noRefs 是正常的，不能在此短路。
 
+	// SSE 阶段拒绝检测：如果 SSE 收到了 assistant 纯文本且无任何图片引用，
+	// 检查是否包含拒绝关键词 → 快速返回 content_policy 不可重试错误。
+	if sseResult.AssistantText != "" && len(sseResult.FileIDs) == 0 &&
+		len(sseResult.SedimentIDs) == 0 && sseResult.ImageGenTaskID == "" {
+		if isRefusalText(sseResult.AssistantText) {
+			logger.L().Warn("image SSE: upstream refusal detected",
+				zap.Uint64("account_id", lease.Account.ID),
+				zap.String("task_id", opt.TaskID),
+				zap.String("text", sseResult.AssistantText))
+			return false, ErrContentPolicy, fmt.Errorf("%s", sseResult.AssistantText)
+		}
+	}
+
 	// 聚合 SSE 阶段的所有引用:file-service 优先,sediment 补位
 	var fileRefs []string
 	fileRefs = append(fileRefs, sseResult.FileIDs...)
 	for _, s := range sseResult.SedimentIDs {
 		fileRefs = append(fileRefs, "sed:"+s)
-	}
-
-	// 图生图:SSE 正则扫整段流,会把 user 消息里「参考图」的 file-service://
-	// 也扫进来,必须在判断"是否够数跳过 Poll"之前先剔除,否则参考图会被误算
-	// 为生成结果,导致跳过 Poll 后返回原图。
-	if len(refs) > 0 {
-		refSet := referenceUploadFileIDSet(refs)
-		logger.L().Info("image runner ref-filter debug",
-			zap.String("task_id", opt.TaskID),
-			zap.Int("refs_count", len(refs)),
-			zap.Any("refSet", refSet),
-			zap.Strings("fileRefs_before", fileRefs))
-		if len(refSet) > 0 {
-			n0 := len(fileRefs)
-			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
-			logger.L().Info("image runner ref-filter result",
-				zap.String("task_id", opt.TaskID),
-				zap.Int("before", n0), zap.Int("after", len(fileRefs)),
-				zap.Strings("fileRefs_after", fileRefs))
-		}
 	}
 
 	// SSE 已经把期望数量的图带回来了 → 直接下载,跳过 Poll,省时间
@@ -534,16 +527,6 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		case chatgpt.PollStatusTimeout:
 			return false, ErrPollTimeout, fmt.Errorf("poll timeout: %s", poll.ErrorDetail)
 		default:
-			// 检查是否为上游内容策略拒绝（不可重试）——
-			// poll 检测到 assistant 纯文本拒绝时 ErrorDetail 就是上游原文
-			if !strings.Contains(poll.ErrorDetail, "429") &&
-				!strings.Contains(poll.ErrorDetail, "context canceled") {
-				logger.L().Warn("image poll: upstream refusal detected",
-					zap.Uint64("account_id", lease.Account.ID),
-					zap.String("task_id", opt.TaskID),
-					zap.String("detail", poll.ErrorDetail))
-				return false, ErrContentPolicy, fmt.Errorf("%s", poll.ErrorDetail)
-			}
 			// poll error — 只打日志,不标记账号状态
 			logger.L().Warn("image poll error, will retry with another account",
 				zap.Uint64("account_id", lease.Account.ID),
@@ -553,12 +536,21 @@ func (r *Runner) runOnce(ctx context.Context, opt RunOptions, result *RunResult)
 		}
 	}
 
-	// Poll 合并后也做一次过滤（poll 路径的 ExtractImageToolMsgs 本身不含参考图，
-	// 但 SSE 阶段残留的 fileRefs 可能还有，去重合并时又带进来了）
+	// 图生图:ParseImageSSE 用正则扫整段 SSE,会把 user 消息里「参考图」的
+	// file-service:// 指纹和 assistant 的出图一起扫进 FileIDs,且参考图往往先出现,
+	// 导致返回的 /p/img/.../0 实际下载的是上传图而非结果图。
+	// 轮询路径 ExtractImageToolMsgs 只收 async_task_type=image_gen 的 tool,不含参考图;
+	// 这里对合并后的 fileRefs 做一层差集即可。
 	if len(refs) > 0 {
 		refSet := referenceUploadFileIDSet(refs)
 		if len(refSet) > 0 {
+			n0 := len(fileRefs)
 			fileRefs = filterOutReferenceFileIDs(fileRefs, refSet)
+			if n0 != len(fileRefs) {
+				logger.L().Info("image runner stripped reference file_ids from SSE-captured refs",
+					zap.String("task_id", opt.TaskID),
+					zap.Int("before", n0), zap.Int("after", len(fileRefs)))
+			}
 		}
 	}
 
@@ -666,5 +658,15 @@ func filterOutReferenceFileIDs(fileRefs []string, refSet map[string]struct{}) []
 		out = append(out, ref)
 	}
 	return out
+}
+
+// isRefusalText 检查文本是否包含上游拒绝出图的关键词。
+func isRefusalText(text string) bool {
+	for _, kw := range chatgpt.RefusalKeywords {
+		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	return false
 }
 
