@@ -93,7 +93,6 @@ Thumbs.db
 /index.html
 /gpt2api-update.zip
 /md-web/node_modules/
-/md-web/dist/
 /md-web/build*.log
 /*.json
 /aug-api/
