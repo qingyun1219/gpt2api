@@ -16,7 +16,7 @@ const config = useConfigStore()
         <svg v-if="config.dark" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
         <svg v-else viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       </button>
-      <button class="nav-btn-primary" @click="router.push('/play')">
+      <button class="nav-btn-primary" @click="router.push('/')">
         工作台
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
       </button>
@@ -30,22 +30,39 @@ const config = useConfigStore()
     <section class="card">
       <h2>可用模型</h2>
       <table class="tb"><thead><tr><th>模型 ID</th><th>说明</th></tr></thead><tbody>
-        <tr><td><code>gpt-image-2</code></td><td>GPT Image 2 标准版（1024px）</td></tr>
-        <tr><td><code>gpt-image-2-2k</code></td><td>自动 2K 放大（长边 2560px）</td></tr>
-        <tr><td><code>gpt-image-2-4k</code></td><td>自动 4K 放大（长边 3840px）</td></tr>
+        <tr><td><code>gpt-image-2</code></td><td>GPT Image 2 高清生图（支持 1K / 2K / 4K 输出）</td></tr>
         <tr><td><code>gemini-3.1-flash-image</code></td><td>Gemini Flash 生图（走 chat/completions）</td></tr>
       </tbody></table>
+      <h3>分辨率控制</h3>
+      <p class="note">通过 <code>size</code> 自动推断输出档位：<code>1024x1024</code> / <code>1k</code> 为原图，<code>2048x2048</code> / <code>2k</code> 为 2K，<code>4096x4096</code> / <code>4k</code> 为 4K。也可显式传 <code>upscale</code> 参数覆盖（值：<code>2k</code> / <code>4k</code>）。</p>
     </section>
 
     <section class="card"><h2>① 文生图</h2>
       <p class="ep">POST <code>/v1/images/generations</code></p>
       <pre class="code">{
   "model": "gpt-image-2",
-  "prompt": "A cute orange cat on a windowsill",
+  "prompt": "A cute orange cat playing with yarn, studio ghibli style",
   "n": 1,
-  "size": "1024x1024"
+  "size": "1024x1024",
+  "response_format": "b64_json"
 }</pre>
-      <p class="note">size 可选：<code>1024x1024</code>　<code>1792x1024</code>（16:9）　<code>1024x1792</code>（9:16）</p>
+      <p class="note">size 可选：<code>1024x1024</code>（1K）　<code>1792x1024</code>（横屏）　<code>1024x1792</code>（竖版）　<code>2048x2048</code>（2K）　<code>4096x4096</code>（4K）</p>
+      <p class="note">画面比例通过 prompt 前缀控制，例如 <code>"prompt": "Make the aspect ratio 16:9 , A cute cat"</code>。支持的比例：auto、1:1、16:9、9:16、5:4、4:5、4:3、3:4、3:2、2:3、21:9。</p>
+      <h3>2K / 4K 高清输出示例</h3>
+      <pre class="code">{
+  "model": "gpt-image-2",
+  "prompt": "A beautiful landscape",
+  "size": "2048x2048",
+  "response_format": "b64_json"
+}
+// 或使用 upscale 参数
+{
+  "model": "gpt-image-2",
+  "prompt": "A beautiful landscape",
+  "size": "1024x1024",
+  "upscale": "4k",
+  "response_format": "b64_json"
+}</pre>
     </section>
 
     <section class="card"><h2>② 图生图（multipart）</h2>
@@ -53,10 +70,10 @@ const config = useConfigStore()
       <pre class="code">curl -X POST "${BASE_URL}/v1/images/edits" \
   -H "Authorization: Bearer ${API_KEY}" \
   -F "model=gpt-image-2" \
-  -F "prompt=把猫咪变成卡通风格" \
+  -F "prompt=Restyle this image as a watercolor painting" \
   -F "image=@photo.png" \
   -F "n=1" -F "size=1024x1024"</pre>
-      <p class="note">支持多张参考图（最多 4 张）：重复 <code>-F "image=@xxx.png"</code></p>
+      <p class="note">支持多张参考图（最多 4 张，单张最大 20MB）：重复 <code>-F "image=@xxx.png"</code>。也可加 <code>-F "upscale=2k"</code> 输出高清。</p>
     </section>
 
     <section class="card"><h2>③ 图生图（JSON）</h2>
@@ -72,36 +89,7 @@ const config = useConfigStore()
       <p class="note">每项支持：data URL / https URL / 纯 base64 字符串</p>
     </section>
 
-    <section class="card"><h2>④ 异步模式</h2>
-      <p class="ep">POST <code>/v1/images/generations</code>　+ <code>"wait": false</code></p>
-      <p class="note">默认同步阻塞（1~5 分钟），设置 <code>"wait": false</code> 可立即返回 task_id，后台异步生成。</p>
-      <h3>第 1 步：提交任务</h3>
-      <pre class="code">{
-  "model": "gpt-image-2",
-  "prompt": "A futuristic city at sunset",
-  "wait": false
-}
-// → 202 Accepted
-{
-  "task_id": "img_xxxxxxxx",
-  "status": "dispatched",
-  "message": "任务已提交,请通过 GET /v1/images/tasks/img_xxxxxxxx 查询结果"
-}</pre>
-      <h3>第 2 步：轮询结果</h3>
-      <p class="ep">GET <code>/v1/images/tasks/{task_id}</code></p>
-      <pre class="code">// → 200 OK
-{
-  "task_id": "img_xxxxxxxx",
-  "status": "success",       // queued → dispatched → running → success / failed
-  "data": [
-    { "url": "/p/img/img_xxxxxxxx/0?...", "file_id": "..." }
-  ],
-  "error": ""
-}</pre>
-      <p class="note">建议每 3~5 秒轮询一次。status 为 <code>success</code> 或 <code>failed</code> 时停止。</p>
-    </section>
-
-    <section class="card"><h2>⑤ 通过 chat 接口生图</h2>
+    <section class="card"><h2>④ 通过 chat 接口生图</h2>
       <p class="ep">POST <code>/v1/chat/completions</code></p>
       <p class="note">支持 Gemini 生图和 GPT Image 生图，统一走 chat 接口。model 设为图片模型即可。</p>
       <pre class="code">{
@@ -112,12 +100,11 @@ const config = useConfigStore()
       <p class="note">也支持 <code>gemini-3.1-flash-image</code>。返回标准 ChatCompletion 格式，图片以 markdown data URL 嵌入 content。</p>
     </section>
 
-    <section class="card"><h2>⑥ 响应格式</h2>
+    <section class="card"><h2>⑤ 响应格式</h2>
       <h3>/v1/images/generations · /v1/images/edits</h3>
       <pre class="code">{
   "created": 1234567890,
-  "task_id": "img_xxxxxxxx",
-  "data": [{ "b64_json": "/9j/4AAQ...", "file_id": "..." }]
+  "data": [{ "b64_json": "/9j/4AAQ..." }]
 }</pre>
       <h3>/v1/chat/completions（图片模型）</h3>
       <pre class="code">{
@@ -138,7 +125,7 @@ const config = useConfigStore()
       <p class="note">图片在 <code>choices[0].message.content</code> 中以 markdown data URL 返回。同时 <code>data</code> 字段也保留，可按任一方式取图。</p>
     </section>
 
-    <section class="card"><h2>⑦ 错误码参考</h2>
+    <section class="card"><h2>⑥ 错误码参考</h2>
       <p class="note">错误返回 OpenAI 格式：<code>{"error":{"code":"xxx","message":"..."}}</code></p>
       <table class="tb"><thead><tr><th>错误码</th><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
         <tr><td><code>no_available_account</code></td><td>503</td><td>账号池暂无可用账号</td><td>等 30s 重试</td></tr>

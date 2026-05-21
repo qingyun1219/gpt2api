@@ -68,10 +68,10 @@ export interface ModelInfo {
   type: 'image' | 'chat' | string
 }
 
-/** 只展示这 4 个生图模型 */
-const ALLOWED_MODELS = ['gemini-3.1-flash-image', 'gpt-image-2', 'gpt-image-2-2k', 'gpt-image-2-4k']
+/** 只展示这 2 个生图模型 */
+const ALLOWED_MODELS = ['gpt-image-2', 'gemini-3.1-flash-image']
 
-/** 获取模型列表 —— 只保留指定的 4 个生图模型 */
+/** 获取模型列表 —— 只保留指定的生图模型 */
 export async function fetchModels(): Promise<ModelInfo[]> {
   const resp = await fetch(`${base()}/v1/models`, { headers: headers() })
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -92,8 +92,10 @@ export async function generateImage(
   n: number = 1,
   size: string = '1024x1024',
   signal?: AbortSignal,
+  quality?: string,
 ): Promise<{ imageUrls: string[] }> {
-  const body = { model, prompt, n, size }
+  const body: Record<string, any> = { model, prompt, n, size, response_format: 'b64_json' }
+  if (quality && quality !== '1k') body.upscale = quality
   const resp = await fetch(`${base()}/v1/images/generations`, {
     method: 'POST', headers: headers(), body: JSON.stringify(body), signal,
   })
@@ -114,12 +116,14 @@ export async function editImage(
   n: number = 1,
   size: string = '1024x1024',
   signal?: AbortSignal,
+  quality?: string,
 ): Promise<{ imageUrls: string[] }> {
   const formData = new FormData()
   formData.append('model', model)
   formData.append('prompt', prompt)
   formData.append('n', String(n))
   formData.append('size', size)
+  if (quality && quality !== '1k') formData.append('upscale', quality)
   for (let i = 0; i < imageDataUrls.length; i++) {
     const blob = await dataUrlToBlob(imageDataUrls[i])
     formData.append('image', blob, `ref_${i}.png`)

@@ -3,8 +3,7 @@ import { ref, watch } from 'vue'
 
 export const useConfigStore = defineStore('config', () => {
   const nodes = [
-    { label: '🇺🇸 美国节点（推荐）', value: 'https://cc.qycnas.cn' },
-    { label: '🇭🇰 香港节点', value: 'https://cc.jispul.com' },
+    { label: '🇭🇰 香港节点（推荐）', value: 'https://cc.jispul.com' },
   ]
 
   // 如果 localStorage 缓存的地址不在 nodes 列表里，重置为默认值
