@@ -213,6 +213,21 @@ func (r *Refresher) RefreshAuto(ctx context.Context, a *Account) (*RefreshResult
 	}
 	res := &RefreshResult{AccountID: a.ID, Email: a.Email}
 
+	// Codex 账号:AT 由外部 CPA 系统续命,RT 是一次性的不能二次使用。
+	// AT 没过期就跳过,不尝试刷新;已过期则记录等待外部更新,不标 dead。
+	if a.IsCodex() {
+		if a.TokenExpiresAt.Valid && time.Now().Before(a.TokenExpiresAt.Time) {
+			res.OK = true
+			res.Source = "codex"
+			res.ExpiresAt = a.TokenExpiresAt.Time
+			res.ATVerified = true
+			return res, nil
+		}
+		res.Source = "failed"
+		res.Error = "Codex AT 已过期,等待外部更新"
+		return res, nil
+	}
+
 	// 标记:RT 换出的 AT 是否被 web 后端以 401 拒绝(iOS scope vs web scope 不匹配)
 	var rtRejectedByWeb bool
 

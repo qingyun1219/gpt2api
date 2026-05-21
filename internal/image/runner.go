@@ -166,6 +166,9 @@ func (r *Runner) Run(ctx context.Context, opt RunOptions) *RunResult {
 				}
 				_ = r.quotaDecr.DecrQuota(context.Background(), result.AccountID, n)
 			}
+			// 生图成功 → 账号确实可用,恢复为 healthy(Codex 账号无法通过
+			// conversation/init 探测,只能靠生图结果证明可用性)
+			r.sched.RestoreHealthy(context.Background(), result.AccountID)
 		} else {
 			_ = r.dao.MarkFailed(ctx, opt.TaskID, result.ErrorCode)
 		}

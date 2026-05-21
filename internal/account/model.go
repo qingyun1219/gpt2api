@@ -2,6 +2,7 @@ package account
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -73,4 +74,11 @@ type Binding struct {
 	AccountID uint64    `db:"account_id" json:"account_id"`
 	ProxyID   uint64    `db:"proxy_id" json:"proxy_id"`
 	BoundAt   time.Time `db:"bound_at" json:"bound_at"`
+}
+
+// IsCodex 判断是否为 Codex 类型账号。
+// Codex AT 的作用域是 OAuth API,不兼容 chatgpt.com Web 后端接口
+// (conversation/init、/me 等),探测和刷新需要特殊处理。
+func (a *Account) IsCodex() bool {
+	return strings.EqualFold(a.AccountType, "codex")
 }
