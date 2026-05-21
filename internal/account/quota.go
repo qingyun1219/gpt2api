@@ -163,9 +163,21 @@ func (q *QuotaProber) ProbeByID(ctx context.Context, id uint64) (*QuotaResult, e
 }
 
 // ProbeOne 执行一次探测。
-// 访问 https://chatgpt.com/backend-api/rate_limits(需要 AT),挑选 image 相关条目汇总。
+// Codex 账号的 AT 不兼容 chatgpt.com Web 后端接口(conversation/init 会 403),
+// 直接跳过,返回"不支持探测"而非错误,避免误标风险。
 func (q *QuotaProber) ProbeOne(ctx context.Context, a *Account) (*QuotaResult, error) {
 	res := &QuotaResult{AccountID: a.ID, Email: a.Email}
+
+	// Codex 账号: AT 作用域不兼容 conversation/init, 跳过探测
+	if a.IsCodex() {
+		res.OK = true
+		res.Error = ""
+		// 保持已有额度不变,不覆盖为 -1
+		res.Remaining = a.ImageQuotaRemaining
+		res.Total = a.ImageQuotaTotal
+		return res, nil
+	}
+
 	at, err := q.svc.cipher.DecryptString(a.AuthTokenEnc)
 	if err != nil || at == "" {
 		res.Error = "AT 解密失败"
