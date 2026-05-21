@@ -30,11 +30,9 @@ const config = useConfigStore()
     <section class="card">
       <h2>可用模型</h2>
       <table class="tb"><thead><tr><th>模型 ID</th><th>说明</th></tr></thead><tbody>
-        <tr><td><code>gpt-image-2</code></td><td>GPT Image 2 标准版（1024px）</td></tr>
-        <tr><td><code>gpt-image-2-2k</code></td><td>自动 2K 放大（长边 2560px）</td></tr>
-        <tr><td><code>gpt-image-2-4k</code></td><td>自动 4K 放大（长边 3840px）</td></tr>
-        <tr><td><code>gemini-3.1-flash-image</code></td><td>Gemini Flash 生图（走 chat/completions）</td></tr>
+        <tr><td><code>gpt-image-2</code></td><td>GPT Image 2 生图，通过 size 参数控制画质档位</td></tr>
       </tbody></table>
+      <p class="note">画质通过 <code>size</code> 参数控制：<code>1024x1024</code> 标清 · <code>2048x2048</code>/<code>2k</code> 高清 2K · <code>4096x4096</code>/<code>4k</code> 超清 4K</p>
     </section>
 
     <section class="card"><h2>① 文生图</h2>
@@ -45,7 +43,14 @@ const config = useConfigStore()
   "n": 1,
   "size": "1024x1024"
 }</pre>
-      <p class="note">size 可选：<code>1024x1024</code>　<code>1792x1024</code>（16:9）　<code>1024x1792</code>（9:16）</p>
+      <h3>size 可用值</h3>
+      <table class="tb"><thead><tr><th>size</th><th>画质</th><th>说明</th></tr></thead><tbody>
+        <tr><td><code>1024x1024</code></td><td>标清</td><td>默认，速度最快</td></tr>
+        <tr><td><code>1792x1024</code></td><td>标清 16:9</td><td>横版</td></tr>
+        <tr><td><code>1024x1792</code></td><td>标清 9:16</td><td>竖版</td></tr>
+        <tr><td><code>2048x2048</code> 或 <code>2k</code></td><td>高清 2K</td><td>2 倍分辨率</td></tr>
+        <tr><td><code>4096x4096</code> 或 <code>4k</code></td><td>超清 4K</td><td>4 倍分辨率</td></tr>
+      </tbody></table>
     </section>
 
     <section class="card"><h2>② 图生图（multipart）</h2>
@@ -72,90 +77,23 @@ const config = useConfigStore()
       <p class="note">每项支持：data URL / https URL / 纯 base64 字符串</p>
     </section>
 
-    <section class="card"><h2>④ 异步模式</h2>
-      <p class="ep">POST <code>/v1/images/generations</code>　+ <code>"wait": false</code></p>
-      <p class="note">默认同步阻塞（1~5 分钟），设置 <code>"wait": false</code> 可立即返回 task_id，后台异步生成。</p>
-      <h3>第 1 步：提交任务</h3>
-      <pre class="code">{
-  "model": "gpt-image-2",
-  "prompt": "A futuristic city at sunset",
-  "wait": false
-}
-// → 202 Accepted
-{
-  "task_id": "img_xxxxxxxx",
-  "status": "dispatched",
-  "message": "任务已提交,请通过 GET /v1/images/tasks/img_xxxxxxxx 查询结果"
-}</pre>
-      <h3>第 2 步：轮询结果</h3>
-      <p class="ep">GET <code>/v1/images/tasks/{task_id}</code></p>
-      <pre class="code">// → 200 OK
-{
-  "task_id": "img_xxxxxxxx",
-  "status": "success",       // queued → dispatched → running → success / failed
-  "data": [
-    { "url": "/p/img/img_xxxxxxxx/0?...", "file_id": "..." }
-  ],
-  "error": ""
-}</pre>
-      <p class="note">建议每 3~5 秒轮询一次。status 为 <code>success</code> 或 <code>failed</code> 时停止。</p>
-    </section>
-
-    <section class="card"><h2>⑤ 通过 chat 接口生图</h2>
-      <p class="ep">POST <code>/v1/chat/completions</code></p>
-      <p class="note">支持 Gemini 生图和 GPT Image 生图，统一走 chat 接口。model 设为图片模型即可。</p>
-      <pre class="code">{
-  "model": "gpt-image-2",
-  "stream": false,
-  "messages": [{ "role": "user", "content": "画一只在月光下的狼" }]
-}</pre>
-      <p class="note">也支持 <code>gemini-3.1-flash-image</code>。返回标准 ChatCompletion 格式，图片以 markdown data URL 嵌入 content。</p>
-    </section>
-
-    <section class="card"><h2>⑥ 响应格式</h2>
-      <h3>/v1/images/generations · /v1/images/edits</h3>
+    <section class="card"><h2>④ 响应格式</h2>
       <pre class="code">{
   "created": 1234567890,
-  "task_id": "img_xxxxxxxx",
-  "data": [{ "b64_json": "/9j/4AAQ...", "file_id": "..." }]
+  "data": [{ "url": "https://..." }]
 }</pre>
-      <h3>/v1/chat/completions（图片模型）</h3>
-      <pre class="code">{
-  "id": "chatcmpl-img-img_xxxxxxxx",
-  "object": "chat.completion",
-  "model": "gpt-image-2",
-  "choices": [{
-    "index": 0,
-    "message": {
-      "role": "assistant",
-      "content": "![image_0](data:image/png;base64,iVBOR...)"
-    },
-    "finish_reason": "stop"
-  }],
-  "usage": { "prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11 },
-  "data": [{ "b64_json": "iVBOR...", "file_id": "..." }]
-}</pre>
-      <p class="note">图片在 <code>choices[0].message.content</code> 中以 markdown data URL 返回。同时 <code>data</code> 字段也保留，可按任一方式取图。</p>
+      <p class="note">图片以 URL 方式返回，链接有效期约 24 小时。</p>
     </section>
 
-    <section class="card"><h2>⑦ 错误码参考</h2>
+    <section class="card"><h2>⑤ 常见错误</h2>
       <p class="note">错误返回 OpenAI 格式：<code>{"error":{"code":"xxx","message":"..."}}</code></p>
-      <table class="tb"><thead><tr><th>错误码</th><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
-        <tr><td><code>no_available_account</code></td><td>503</td><td>账号池暂无可用账号</td><td>等 30s 重试</td></tr>
-        <tr><td><code>rate_limited</code></td><td>503</td><td>上游限流</td><td>等 30s 重试</td></tr>
-        <tr><td><code>rate_limit_rpm</code></td><td>429</td><td>触发每分钟请求数限制</td><td>降低频率</td></tr>
-        <tr><td><code>insufficient_balance</code></td><td>402</td><td>积分不足</td><td>充值</td></tr>
-        <tr><td><code>model_not_allowed</code></td><td>403</td><td>Key 无权调用该模型</td><td>联系管理员</td></tr>
-        <tr><td><code>model_not_found</code></td><td>400</td><td>模型不存在或已下架</td><td>检查 model 字段</td></tr>
-        <tr><td><code>upstream_error</code></td><td>502</td><td>上游服务返回错误</td><td>重试</td></tr>
-        <tr><td><code>poll_timeout</code></td><td>502</td><td>图片生成超时</td><td>重试</td></tr>
-        <tr><td><code>network_transient</code></td><td>502</td><td>网络波动</td><td>自动重试</td></tr>
-        <tr><td><code>auth_required</code></td><td>502</td><td>上游鉴权失败</td><td>自动换号重试</td></tr>
-        <tr><td><code>download_failed</code></td><td>502</td><td>图片下载失败</td><td>重试</td></tr>
-        <tr><td><code>invalid_response</code></td><td>502</td><td>上游返回数据异常</td><td>重试</td></tr>
-        <tr><td><code>invalid_request_error</code></td><td>400</td><td>请求参数有误</td><td>检查请求体</td></tr>
-        <tr><td><code>invalid_reference_image</code></td><td>400</td><td>参考图解析失败</td><td>检查图片格式/大小</td></tr>
-        <tr><td><code>billing_error</code></td><td>500</td><td>计费系统异常</td><td>联系管理员</td></tr>
+      <table class="tb"><thead><tr><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
+        <tr><td>400</td><td>请求参数有误</td><td>检查 model / prompt / size</td></tr>
+        <tr><td>401</td><td>API Key 无效</td><td>检查卡密是否正确</td></tr>
+        <tr><td>402</td><td>积分不足</td><td>充值后再试</td></tr>
+        <tr><td>429</td><td>请求过于频繁</td><td>降低频率，稍后再试</td></tr>
+        <tr><td>502</td><td>上游生成失败</td><td>重试即可</td></tr>
+        <tr><td>504</td><td>生成超时</td><td>重试，或选择标清（1K）加快速度</td></tr>
       </tbody></table>
     </section>
   </main>

@@ -68,8 +68,8 @@ export interface ModelInfo {
   type: 'image' | 'chat' | string
 }
 
-/** 只展示这 4 个生图模型 */
-const ALLOWED_MODELS = ['gemini-3.1-flash-image', 'gpt-image-2', 'gpt-image-2-2k', 'gpt-image-2-4k']
+/** 只展示这些生图模型 */
+const ALLOWED_MODELS = ['gemini-3.1-flash-image', 'gpt-image-2']
 
 /** 获取模型列表 —— 只保留指定的 4 个生图模型 */
 export async function fetchModels(): Promise<ModelInfo[]> {

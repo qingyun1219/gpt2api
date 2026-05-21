@@ -24,10 +24,20 @@ const previewVisible = ref(false); const previewUrl = ref(''); const sideOpen = 
 interface RO { label:string; ratio:string; size:string }
 const RATIOS:RO[] = [{label:'1:1',ratio:'1:1',size:'1024x1024'},{label:'16:9',ratio:'16:9',size:'1792x1024'},{label:'9:16',ratio:'9:16',size:'1024x1792'},{label:'4:3',ratio:'4:3',size:'1792x1024'},{label:'3:4',ratio:'3:4',size:'1024x1792'}]
 const gptRatio = ref('1:1'); const gptN = ref(1)
-const gptSize = computed(() => RATIOS.find(r => r.ratio===gptRatio.value)?.size??'1024x1024')
+// ===== 画质档位(通过 size 控制) =====
+interface QO { label:string; value:string; mult:number }
+const QUALITIES:QO[] = [{label:'标清',value:'1k',mult:1},{label:'2K',value:'2k',mult:2},{label:'4K',value:'4k',mult:4}]
+const gptQuality = ref('1k')
+const gptSize = computed(() => {
+  const base = RATIOS.find(r => r.ratio===gptRatio.value)?.size ?? '1024x1024'
+  const mult = QUALITIES.find(q => q.value===gptQuality.value)?.mult ?? 1
+  if (mult === 1) return base
+  const [w,h] = base.split('x').map(Number)
+  return `${w*mult}x${h*mult}`
+})
 const isGemini = computed(() => selectedModel.value.includes('gemini'))
 // ===== Convs (IndexedDB 持久化) =====
-interface Msg { role:'user'|'ai'; prompt?:string; model?:string; ratio?:string; count?:number; images:string[]; text?:string; status?:string; time:string; refs?:string[] }
+interface Msg { role:'user'|'ai'; prompt?:string; model?:string; ratio?:string; quality?:string; count?:number; images:string[]; text?:string; status?:string; time:string; refs?:string[] }
 interface Conv { id:string; title:string; msgs:Msg[]; ts:number }
 const convs = ref<Conv[]>([]); const curId = ref('')
 const curConv = computed(() => convs.value.find(c => c.id===curId.value))
@@ -41,7 +51,7 @@ async function doSave() {
       id: c.id, title: c.title, ts: c.ts,
       msgs: c.msgs.map(m => ({
         role: m.role, prompt: m.prompt, model: m.model,
-        ratio: m.ratio, count: m.count, status: m.status,
+        ratio: m.ratio, quality: m.quality, count: m.count, status: m.status,
         time: m.time, text: m.text,
         images: m.images ? [...m.images] : [],
       }))
@@ -104,13 +114,13 @@ const TIMEOUT = 120_000
 async function generate() {
   const p=prompt.value.trim(); if(!p||!selectedModel.value) return
   const conv=curConv.value; if(!conv) return
-  const mdl=selectedModel.value; const ratio=gptRatio.value; const sz=gptSize.value
+  const mdl=selectedModel.value; const ratio=gptRatio.value; const sz=gptSize.value; const quality=gptQuality.value
   const gem=isGemini.value; const total=gptN.value; const refs=[...uploadedImages.value]
   let fp=p; if(!gem&&ratio!=='1:1') fp=`Make the aspect ratio ${ratio} , ${p}`
   // 用时间戳做计时器 key
   const tKey = 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,6)
   // 插入消息（直接操作 reactive 数组）
-  const userMsg: Msg = {role:'user',prompt:p,model:mdl,ratio,count:total,images:[],time:new Date().toISOString(),refs}
+  const userMsg: Msg = {role:'user',prompt:p,model:mdl,ratio,quality:quality!=='1k'?quality:undefined,count:total,images:[],time:new Date().toISOString(),refs}
   const aiMsg: Msg = {role:'ai',images:[],status:'generating',time:tKey}
   conv.msgs.push(userMsg, aiMsg)
   if(conv.title==='新对话') conv.title=p.slice(0,20)||'图片生成'
@@ -189,7 +199,7 @@ const vClickOutside = { mounted(el:any,binding:any){ el._co=((e:Event)=>{if(!el.
       <template v-for="(msg,mi) in (curConv?.msgs||[])" :key="mi">
         <div v-if="msg.role==='user'" class="msg msg-user"><div class="msg-bubble u-bbl">
           <div class="msg-text">{{ msg.prompt }}</div>
-          <div class="msg-tags"><span class="tag">{{ msg.model }}</span><span class="tag" v-if="msg.ratio">{{ msg.ratio }}</span><span class="tag" v-if="(msg.count||0)>1">{{ msg.count }}张</span></div>
+          <div class="msg-tags"><span class="tag">{{ msg.model }}</span><span class="tag" v-if="msg.ratio">{{ msg.ratio }}</span><span class="tag" v-if="msg.quality">{{ msg.quality.toUpperCase() }}</span><span class="tag" v-if="(msg.count||0)>1">{{ msg.count }}张</span></div>
           <div v-if="msg.refs?.length" class="msg-refs"><img v-for="(r,ri) in msg.refs" :key="ri" :src="r" class="ref-thumb"/></div>
           <div class="msg-time-r">{{ fmtT(msg.time) }}</div>
         </div></div>
@@ -251,6 +261,10 @@ const vClickOutside = { mounted(el:any,binding:any){ el._co=((e:Event)=>{if(!el.
           <!-- 比例 -->
           <div class="tb-ratios">
             <button v-for="r in RATIOS" :key="r.ratio" class="tb-r" :class="{act:gptRatio===r.ratio}" @click="gptRatio=r.ratio">{{ r.label }}</button>
+          </div>
+          <!-- 画质 -->
+          <div class="tb-ratios">
+            <button v-for="q in QUALITIES" :key="q.value" class="tb-r" :class="{act:gptQuality===q.value}" @click="gptQuality=q.value">{{ q.label }}</button>
           </div>
           <!-- 张数（紧跟比例后面） -->
           <div class="tb-n">
