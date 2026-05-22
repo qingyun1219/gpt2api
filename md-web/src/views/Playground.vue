@@ -306,6 +306,11 @@ const vClickOutside = { mounted(el:any,binding:any){ el._co=((e:Event)=>{if(!el.
       <div v-else-if="!curConv?.msgs.length" class="chat-empty"><div class="ce-icon"><svg viewBox="0 0 64 64" fill="none"><path d="M32 6c6.2 0 11.3 4.4 12.5 10.2A13.3 13.3 0 0 1 58 29.4c0 5.6-3.5 10.5-8.4 12.4A13.1 13.1 0 0 1 36.7 58c-4 0-7.7-1.8-10.1-4.6A13.2 13.2 0 0 1 8 41.8 13.1 13.1 0 0 1 6 29.4c0-5.6 3.5-10.5 8.4-12.4A13.1 13.1 0 0 1 27.3 6H32Z" stroke="currentColor" stroke-width="3.6" stroke-linejoin="round"/><path d="M21 19.7 32 13l11 6.7v12.8L32 39.2l-11-6.7V19.7Z" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round"/><path d="m21 32.5 11-6.7 11 6.7M32 13v12.8M32 39.2V52" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="ce-title">开始创作</div><div class="ce-sub">输入描述，生成你想要的图片</div></div>
       <template v-for="(msg,mi) in (curConv?.msgs||[])" :key="mi">
         <div v-if="msg.role==='user'" class="msg msg-user">
+          <div v-if="msg.refs?.length" class="msg-refs">
+            <div v-for="(ref,ri) in msg.refs" :key="ri" class="msg-ref-item" @click="openPv(ref)">
+              <img :src="ref"/>
+            </div>
+          </div>
           <div class="msg-bubble u-bbl">
             <div class="msg-text">{{ msg.prompt }}</div>
           </div>
@@ -533,6 +538,9 @@ const vClickOutside = { mounted(el:any,binding:any){ el._co=((e:Event)=>{if(!el.
 .u-bbl{background:var(--bg-card-solid);color:var(--text);border:1px solid var(--border);border-radius:20px 20px 4px 20px;box-shadow:var(--shadow-sm)}
 .a-bbl{background:var(--bg-card-solid);border:1px solid var(--border);border-radius:20px 20px 20px 4px;box-shadow:var(--shadow-sm)}
 .msg-user{flex-direction:column;align-items:flex-end}
+.msg-refs{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:8px}
+.msg-ref-item{width:64px;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--border);cursor:zoom-in;flex-shrink:0;box-shadow:var(--shadow-sm)}
+.msg-ref-item img{width:100%;height:100%;object-fit:cover}
 .msg-text{margin-bottom:0}
 .msg-under{display:flex;align-items:center;justify-content:space-between;margin-top:4px;padding:0 4px;opacity:0;transition:opacity .2s}
 .msg-user:hover .msg-under{opacity:1}
