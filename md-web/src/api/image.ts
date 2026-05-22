@@ -122,7 +122,7 @@ export async function submitImageTask(
   const submit = await resp.json()
   if (submit.error) throw new Error(submit.error.message || JSON.stringify(submit.error))
   // 兜底：如果直接返回了 data（走了同步）
-  if (submit.data?.length) return { imageUrls: extractImageUrls(submit) }
+  if (submit.data?.length) return { imageUrls: await extractAndConvertImages(submit) }
   const taskId = submit.task_id
   if (!taskId) throw new Error('未返回 task_id')
   return { taskId }
@@ -157,7 +157,7 @@ export async function pollTask(taskId: string, signal?: AbortSignal, skipFirstWa
       })
       if (resp.ok) {
         const result = await resp.json()
-        if (result.status === 'success') return { imageUrls: extractImageUrls(result) }
+        if (result.status === 'success') return { imageUrls: await extractAndConvertImages(result) }
         if (result.status === 'failed' || result.status === 'violated') {
           const errCode = result.error || 'unknown'
           const zh = ERROR_LABELS[errCode]
@@ -207,7 +207,7 @@ export async function editImage(
   }
   const data = await resp.json()
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
-  return { imageUrls: extractImageUrls(data) }
+  return { imageUrls: await extractAndConvertImages(data) }
 }
 
 /** Gemini 生图 — /v1/chat/completions stream=false */
@@ -253,6 +253,27 @@ function extractImageUrls(data: any): string[] {
     else if (item.url) urls.push(item.url)
   }
   return urls
+}
+
+/** 把外部 URL 转成 data URL（base64），失败则返回原 URL */
+async function urlToDataUrl(url: string): Promise<string> {
+  if (url.startsWith('data:')) return url
+  try {
+    const resp = await fetch(url)
+    const blob = await resp.blob()
+    return new Promise((resolve) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result as string)
+      reader.onerror = () => resolve(url)
+      reader.readAsDataURL(blob)
+    })
+  } catch { return url }
+}
+
+/** 提取图片并全部转为 base64 data URL */
+async function extractAndConvertImages(data: any): Promise<string[]> {
+  const raw = extractImageUrls(data)
+  return Promise.all(raw.map(u => urlToDataUrl(u)))
 }
 
 async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
