@@ -102,20 +102,18 @@ export async function fetchModels(): Promise<ModelInfo[]> {
     }))
 }
 
-/** GPT Image 文生图（异步） — 提交到 /async + 轮询 /tasks */
-export async function generateImage(
+/** 提交异步生图任务（秒回 task_id） */
+export async function submitImageTask(
   model: string,
   prompt: string,
   n: number = 1,
   size: string = '1024x1024',
-  signal?: AbortSignal,
   quality?: string,
-): Promise<{ imageUrls: string[] }> {
+): Promise<{ taskId: string } | { imageUrls: string[] }> {
   const body: Record<string, any> = { model, prompt, n, size, response_format: 'b64_json' }
   if (quality && quality !== '1k') body.upscale = quality
-  // 1. 提交异步任务（秒回）
   const resp = await fetch(`${base()}/v1/images/generations/async`, {
-    method: 'POST', headers: headers(), body: JSON.stringify(body), signal,
+    method: 'POST', headers: headers(), body: JSON.stringify(body),
   })
   if (!resp.ok && resp.status !== 202) {
     const e = await resp.text()
@@ -127,16 +125,30 @@ export async function generateImage(
   if (submit.data?.length) return { imageUrls: extractImageUrls(submit) }
   const taskId = submit.task_id
   if (!taskId) throw new Error('未返回 task_id')
-  // 2. 轮询结果
-  return pollTask(taskId, signal)
+  return { taskId }
 }
 
-/** 轮询任务结果：先等 30s，之后每 5s 一次 */
+/** 文生图完整流程：提交 + 轮询 */
+export async function generateImage(
+  model: string,
+  prompt: string,
+  n: number = 1,
+  size: string = '1024x1024',
+  signal?: AbortSignal,
+  quality?: string,
+): Promise<{ imageUrls: string[]; taskId?: string }> {
+  const result = await submitImageTask(model, prompt, n, size, quality)
+  if ('imageUrls' in result) return { imageUrls: result.imageUrls }
+  const poll = await pollTask(result.taskId, signal)
+  return { imageUrls: poll.imageUrls, taskId: result.taskId }
+}
+
+/** 轮询任务结果：先等 firstWait，之后每 5s 一次 */
 const POLL_FIRST_WAIT = 30_000
 const POLL_INTERVAL = 5000
-const MAX_POLLS = 90  // 30s + 90×5s ≈ 最多 ~8 分钟
-async function pollTask(taskId: string, signal?: AbortSignal): Promise<{ imageUrls: string[] }> {
-  await new Promise(r => setTimeout(r, POLL_FIRST_WAIT))
+const MAX_POLLS = 90
+export async function pollTask(taskId: string, signal?: AbortSignal, skipFirstWait = false): Promise<{ imageUrls: string[] }> {
+  if (!skipFirstWait) await new Promise(r => setTimeout(r, POLL_FIRST_WAIT))
   for (let i = 0; i < MAX_POLLS; i++) {
     if (signal?.aborted) throw new Error('⏱ 生成超时，请简化描述或减少细节后重试')
     try {
@@ -176,6 +188,7 @@ export async function editImage(
   formData.append('prompt', prompt)
   formData.append('n', String(n))
   formData.append('size', size)
+  formData.append('response_format', 'b64_json')
   if (quality && quality !== '1k') formData.append('upscale', quality)
   for (let i = 0; i < imageDataUrls.length; i++) {
     const blob = await dataUrlToBlob(imageDataUrls[i])

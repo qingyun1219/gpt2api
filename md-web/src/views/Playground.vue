@@ -2,7 +2,7 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/stores/config'
-import { fetchModels, generateImage, editImage, generateGemini, type ModelInfo } from '@/api/image'
+import { fetchModels, submitImageTask, generateImage, editImage, generateGemini, pollTask, type ModelInfo } from '@/api/image'
 import { idbGet, idbSet } from '@/api/idb'
 import { ElMessage } from 'element-plus'
 const config = useConfigStore()
@@ -51,7 +51,7 @@ interface QO { label:string; value:string }
 const QUALITIES:QO[] = [{label:'标准',value:'1k'},{label:'2K 高清',value:'2k'},{label:'4K 超清',value:'4k'}]
 const gptQuality = ref('1k'); const qualityOpen = ref(false)
 // ===== Convs (IndexedDB 持久化) =====
-interface Msg { role:'user'|'ai'; prompt?:string; model?:string; ratio?:string; quality?:string; count?:number; images:string[]; text?:string; status?:string; time:string; refs?:string[] }
+interface Msg { role:'user'|'ai'; prompt?:string; model?:string; ratio?:string; quality?:string; count?:number; images:string[]; text?:string; status?:string; time:string; refs?:string[]; taskId?:string }
 interface Conv { id:string; title:string; msgs:Msg[]; ts:number }
 const convs = ref<Conv[]>([]); const curId = ref('')
 const curConv = computed(() => convs.value.find(c => c.id===curId.value))
@@ -66,7 +66,7 @@ async function doSave() {
       msgs: c.msgs.map(m => ({
         role: m.role, prompt: m.prompt, model: m.model,
         ratio: m.ratio, quality: m.quality, count: m.count, status: m.status,
-        time: m.time, text: m.text,
+        time: m.time, text: m.text, taskId: m.taskId,
         images: m.images ? [...m.images] : [],
       }))
     }))
@@ -97,8 +97,6 @@ onMounted(async () => {
     }
   }
   if (loaded?.length) {
-    // 修复残留 generating 状态
-    for (const c of loaded) for (const m of c.msgs) if (m.status==='generating') m.status = m.images.length ? 'done' : 'failed'
     convs.value = loaded
   }
   curId.value = localStorage.getItem('ai_cur') || ''
@@ -106,6 +104,8 @@ onMounted(async () => {
   else if (!curId.value || !convs.value.find(c=>c.id===curId.value)) curId.value = convs.value[0].id
   convsLoaded.value = true
   if(authOk.value) { try { models.value=await fetchModels(); if(models.value.length&&!selectedModel.value) selectedModel.value=models.value[0].id } catch {} }
+  // 恢复未完成的异步任务轮询
+  resumePendingTasks()
 })
 onUnmounted(() => { document.removeEventListener('paste',onPaste); window.removeEventListener('beforeunload', onBeforeUnload) })
 // ===== Upload =====
@@ -156,10 +156,24 @@ async function generate() {
       }
     } else {
       const errors: string[] = []
-      const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,undefined,qual):generateImage(mdl,fp,1,sz,undefined,qual))
-        .then(r=>{if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}}).catch((e:any)=>{
-          if(e?.message) errors.push(e.message)
-        }))
+      const tasks=Array.from({length:total},async ()=>{
+        if(refs.length) {
+          // 图生图走同步
+          try {
+            const r=await editImage(mdl,fp,refs,1,sz,undefined,qual)
+            if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}
+          } catch(e:any){if(e?.message) errors.push(e.message)}
+        } else {
+          // 文生图走异步：先提交拿 taskId，存到消息，再轮询
+          try {
+            const sub=await submitImageTask(mdl,fp,1,sz,qual)
+            if('imageUrls' in sub){if(sub.imageUrls.length){conv.msgs[aiIdx].images.push(...sub.imageUrls);scrollBot()};return}
+            conv.msgs[aiIdx].taskId=sub.taskId; doSave()  // 存 taskId，关页面可恢复
+            const r=await pollTask(sub.taskId)
+            if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}
+          } catch(e:any){if(e?.message) errors.push(e.message)}
+        }
+      })
       await Promise.allSettled(tasks)
       if(!conv.msgs[aiIdx].images.length && errors.length) conv.msgs[aiIdx].text = errors[0]
     }
@@ -167,6 +181,33 @@ async function generate() {
     conv.msgs[aiIdx].time = new Date().toISOString()
   } catch{ conv.msgs[aiIdx].status='failed'; conv.msgs[aiIdx].time=new Date().toISOString() }
   finally { activeTasks.value--; clearInterval(timer); delete timers[tKey]; doSave() }
+}
+// ===== 恢复未完成的异步任务 =====
+function resumePendingTasks() {
+  for (const conv of convs.value) {
+    for (let i = 0; i < conv.msgs.length; i++) {
+      const m = conv.msgs[i]
+      if (m.role === 'ai' && m.status === 'generating' && m.taskId) {
+        // 有 taskId 的 generating 消息 → 恢复轮询
+        const aiIdx = i; const tKey = m.time
+        timers[tKey] = 0
+        const timer = setInterval(() => { timers[tKey]++ }, 1000)
+        activeTasks.value++
+        pollTask(m.taskId, undefined, true).then(r => {
+          if (r.imageUrls.length) { conv.msgs[aiIdx].images.push(...r.imageUrls); scrollBot() }
+          conv.msgs[aiIdx].status = conv.msgs[aiIdx].images.length ? 'done' : 'failed'
+          conv.msgs[aiIdx].time = new Date().toISOString()
+        }).catch(() => {
+          conv.msgs[aiIdx].status = 'failed'; conv.msgs[aiIdx].time = new Date().toISOString()
+        }).finally(() => {
+          activeTasks.value--; clearInterval(timer); delete timers[tKey]; doSave()
+        })
+      } else if (m.role === 'ai' && m.status === 'generating' && !m.taskId) {
+        // 没有 taskId 的 generating → 旧数据，直接标失败
+        m.status = m.images.length ? 'done' : 'failed'
+      }
+    }
+  }
 }
 function copyPrompt(text?:string) {
   if(!text) return
