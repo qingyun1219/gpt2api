@@ -126,8 +126,9 @@ function dlImg(u:string,i:number){
 const chatEl=ref<HTMLElement>()
 function scrollBot(){nextTick(()=>{if(chatEl.value) chatEl.value.scrollTop=chatEl.value.scrollHeight})}
 function fmtT(t:string){if(!t) return '';const d=new Date(t);if(isNaN(d.getTime())) return t;const p=(n:number)=>String(n).padStart(2,'0');return `${p(d.getHours())}:${p(d.getMinutes())}`}
-// ===== Generate（异步模式：提交秒回+轮询，不怕超时） =====
+// ===== Generate（同步模式，5 分钟超时） =====
 const activeTasks = ref(0)
+const TIMEOUT = 300_000
 async function generate() {
   const p=prompt.value.trim(); if(!p||!selectedModel.value) return
   const conv=curConv.value; if(!conv) return
@@ -146,22 +147,25 @@ async function generate() {
   // 独立计时
   timers[tKey] = 0
   const timer = setInterval(()=>{ timers[tKey]++ }, 1000)
+  const ac = new AbortController()
+  const to = setTimeout(()=>ac.abort('timeout'), TIMEOUT)
   activeTasks.value++
   const aiIdx = conv.msgs.length - 1
   try {
     if(gem) {
       for(let i=0;i<total;i++) for(let a=1;a<=3;a++) {
         try {
-          const r=await generateGemini(mdl,fp)
+          const r=await generateGemini(mdl,fp,ac.signal)
           if(r.imageUrls.length){ conv.msgs[aiIdx].images.push(...r.imageUrls); scrollBot(); break }
           if(r.text) conv.msgs[aiIdx].text=r.text
-        } catch(e:any){if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
+        } catch(e:any){if(ac.signal.aborted){conv.msgs[aiIdx].text='⏱ 生成超时，请简化描述或减少细节后重试';break};if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
       }
     } else {
       const errors: string[] = []
-      const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,undefined,qual):generateImage(mdl,fp,1,sz,undefined,qual))
+      const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,ac.signal,qual):generateImage(mdl,fp,1,sz,ac.signal,qual))
         .then(r=>{if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}}).catch((e:any)=>{
-          if(e?.message) errors.push(e.message)
+          if(ac.signal.aborted) errors.push('⏱ 生成超时，请简化描述或减少细节后重试')
+          else if(e?.message) errors.push(e.message)
         }))
       await Promise.allSettled(tasks)
       if(!conv.msgs[aiIdx].images.length && errors.length) conv.msgs[aiIdx].text = errors[0]
@@ -169,7 +173,7 @@ async function generate() {
     conv.msgs[aiIdx].status = conv.msgs[aiIdx].images.length ? 'done' : 'failed'
     conv.msgs[aiIdx].time = new Date().toISOString()
   } catch{ conv.msgs[aiIdx].status='failed'; conv.msgs[aiIdx].time=new Date().toISOString() }
-  finally { activeTasks.value--; clearInterval(timer); delete timers[tKey]; doSave() }
+  finally { activeTasks.value--; clearInterval(timer); clearTimeout(to); delete timers[tKey]; doSave() }
 }
 function copyPrompt(text?:string) {
   if(!text) return
