@@ -128,7 +128,7 @@ function scrollBot(){nextTick(()=>{if(chatEl.value) chatEl.value.scrollTop=chatE
 function fmtT(t:string){if(!t) return '';const d=new Date(t);if(isNaN(d.getTime())) return t;const p=(n:number)=>String(n).padStart(2,'0');return `${p(d.getHours())}:${p(d.getMinutes())}`}
 // ===== Generate（并行多任务，独立计时+超时） =====
 const activeTasks = ref(0)
-const TIMEOUT = 120_000
+const TIMEOUT = 180_000
 async function generate() {
   const p=prompt.value.trim(); if(!p||!selectedModel.value) return
   const conv=curConv.value; if(!conv) return

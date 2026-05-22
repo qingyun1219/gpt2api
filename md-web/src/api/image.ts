@@ -1,10 +1,20 @@
 import { useConfigStore } from '@/stores/config'
 
-/** 错误码 → 中文提示映射 */
+/** 错误码 → 中文提示映射（兼容 gpt2api 自有错误码 + newapi 错误码 + 上游错误码） */
 const ERROR_LABELS: Record<string, string> = {
+  // —— newapi / one-api 常见错误码 ——
+  insufficient_quota: '额度不足，请充值后再试',
+  invalid_api_key: 'API Key 无效，请检查卡密',
+  invalid_authentication: '认证失败，请检查卡密',
+  model_permission_denied: '当前 Key 无权调用该模型',
+  exceed_quota: '额度已用尽，请充值',
+  channel_not_found: '无可用渠道，请稍后重试',
+  no_available_channel: '无可用渠道，请稍后重试',
+  // —— 上游 / 通用错误码 ——
   no_available_account: '账号池暂无可用账号，请稍后重试',
   rate_limited: '请求过于频繁，请稍后再试',
   rate_limit_rpm: '触发每分钟请求数限制，请稍后再试',
+  rate_limit_exceeded: '请求过于频繁，请稍后再试',
   insufficient_balance: '积分不足，请充值后再试',
   billing_error: '计费系统异常',
   model_not_allowed: '当前 API Key 无权调用该模型',
@@ -19,10 +29,13 @@ const ERROR_LABELS: Record<string, string> = {
   invalid_response: '上游返回数据异常，请重试',
   auth_required: '账号鉴权失败，请重试',
   content_policy: '内容策略限制，该提示词被上游拒绝生成',
+  content_policy_violation: '内容策略限制，该提示词被上游拒绝生成',
   unknown: '图片生成失败，请重试',
   image_not_wired: '图片能力未开启，请联系管理员',
   invalid_request_error: '请求参数有误',
   invalid_reference_image: '参考图解析失败，请检查图片格式',
+  server_error: '服务器内部错误，请重试',
+  timeout: '请求超时，请重试',
 }
 
 /** 解析后端 OpenAI 格式的错误响应，返回人类可读的错误信息 */
@@ -42,11 +55,15 @@ function parseApiError(status: number, body: string): string {
       if (msg) return msg
     }
   } catch { /* 非 JSON */ }
-  // 兜底
+  // 兜底 HTTP 状态码
+  if (status === 401) return 'API Key 无效或已过期'
   if (status === 402) return '积分不足，请充值后再试'
+  if (status === 403) return '无权访问，请检查 Key 权限'
   if (status === 429) return '请求过于频繁，请稍后再试'
-  if (status === 503) return '服务暂时不可用，请稍后重试'
+  if (status === 500) return '服务器内部错误，请重试'
   if (status === 502) return '图片生成失败，请重试'
+  if (status === 503) return '服务暂时不可用，请稍后重试'
+  if (status === 504) return '请求超时，图片生成耗时较长，请重试'
   return `请求失败 (HTTP ${status})`
 }
 
