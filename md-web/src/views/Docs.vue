@@ -114,7 +114,7 @@ const config = useConfigStore()
   "data": [{ "b64_json": "/9j/4AAQ..." }]
 }
 // status 流转：queued → dispatched → running → success / failed</pre>
-      <p class="note">建议每 3~5 秒轮询一次。status 为 <code>success</code> 或 <code>failed</code> 时停止。</p>
+      <p class="note">建议提交后先等 30 秒再开始轮询，之后每 5 秒查询一次。status 为 <code>success</code> 或 <code>failed</code> 时停止。</p>
     </section>
 
     <section class="card"><h2>⑤ 通过 chat 接口生图</h2>

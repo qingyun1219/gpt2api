@@ -131,10 +131,13 @@ export async function generateImage(
   return pollTask(taskId, signal)
 }
 
-/** 轮询任务结果 */
-const POLL_INTERVAL = 4000
-const MAX_POLLS = 150  // 最多 10 分钟
+/** 轮询任务结果：先等 30s，之后每 5s 一次 */
+const POLL_FIRST_WAIT = 30_000
+const POLL_INTERVAL = 5000
+const MAX_POLLS = 90  // 30s + 90×5s ≈ 最多 ~8 分钟
 async function pollTask(taskId: string, signal?: AbortSignal): Promise<{ imageUrls: string[] }> {
+  await new Promise(r => setTimeout(r, POLL_FIRST_WAIT))
+  if (signal?.aborted) throw new Error('⏱ 生成超时，请简化描述或减少细节后重试')
   for (let i = 0; i < MAX_POLLS; i++) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL))
     if (signal?.aborted) throw new Error('⏱ 生成超时，请简化描述或减少细节后重试')
