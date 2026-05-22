@@ -128,7 +128,7 @@ function scrollBot(){nextTick(()=>{if(chatEl.value) chatEl.value.scrollTop=chatE
 function fmtT(t:string){if(!t) return '';const d=new Date(t);if(isNaN(d.getTime())) return t;const p=(n:number)=>String(n).padStart(2,'0');return `${p(d.getHours())}:${p(d.getMinutes())}`}
 // ===== Generate（并行多任务，独立计时+超时） =====
 const activeTasks = ref(0)
-const TIMEOUT = 180_000
+const TIMEOUT = 300_000
 async function generate() {
   const p=prompt.value.trim(); if(!p||!selectedModel.value) return
   const conv=curConv.value; if(!conv) return
@@ -148,7 +148,7 @@ async function generate() {
   timers[tKey] = 0
   const timer = setInterval(()=>{ timers[tKey]++ }, 1000)
   const ac = new AbortController()
-  const to = setTimeout(()=>ac.abort(), TIMEOUT)
+  const to = setTimeout(()=>ac.abort('timeout'), TIMEOUT)
   activeTasks.value++
   // 找到 push 后的 Proxy 引用
   const aiIdx = conv.msgs.length - 1
@@ -159,12 +159,15 @@ async function generate() {
           const r=await generateGemini(mdl,fp,ac.signal)
           if(r.imageUrls.length){ conv.msgs[aiIdx].images.push(...r.imageUrls); scrollBot(); break }
           if(r.text) conv.msgs[aiIdx].text=r.text
-        } catch(e:any){if(ac.signal.aborted){conv.msgs[aiIdx].text='⏱ 生成超时';break};if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
+        } catch(e:any){if(ac.signal.aborted){conv.msgs[aiIdx].text='⏱ 生成超时，请重试';break};if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
       }
     } else {
       const errors: string[] = []
       const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,ac.signal,qual):generateImage(mdl,fp,1,sz,ac.signal,qual))
-        .then(r=>{if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}}).catch((e:any)=>{if(e?.message) errors.push(e.message)}))
+        .then(r=>{if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}}).catch((e:any)=>{
+          if(ac.signal.aborted) errors.push('⏱ 生成超时，图片可能仍在后台处理中，请稍后刷新重试')
+          else if(e?.message) errors.push(e.message)
+        }))
       await Promise.allSettled(tasks)
       if(!conv.msgs[aiIdx].images.length && errors.length) conv.msgs[aiIdx].text = errors[0]
     }
