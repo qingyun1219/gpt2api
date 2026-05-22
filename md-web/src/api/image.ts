@@ -102,7 +102,7 @@ export async function fetchModels(): Promise<ModelInfo[]> {
     }))
 }
 
-/** GPT Image 文生图 — /v1/images/generations（同步） */
+/** GPT Image 文生图（异步） — 提交到 /async + 轮询 /tasks */
 export async function generateImage(
   model: string,
   prompt: string,
@@ -113,16 +113,52 @@ export async function generateImage(
 ): Promise<{ imageUrls: string[] }> {
   const body: Record<string, any> = { model, prompt, n, size, response_format: 'b64_json' }
   if (quality && quality !== '1k') body.upscale = quality
-  const resp = await fetch(`${base()}/v1/images/generations`, {
+  // 1. 提交异步任务（秒回）
+  const resp = await fetch(`${base()}/v1/images/generations/async`, {
     method: 'POST', headers: headers(), body: JSON.stringify(body), signal,
   })
-  if (!resp.ok) {
+  if (!resp.ok && resp.status !== 202) {
     const e = await resp.text()
     throw new Error(parseApiError(resp.status, e))
   }
-  const data = await resp.json()
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
-  return { imageUrls: extractImageUrls(data) }
+  const submit = await resp.json()
+  if (submit.error) throw new Error(submit.error.message || JSON.stringify(submit.error))
+  // 兜底：如果直接返回了 data（走了同步）
+  if (submit.data?.length) return { imageUrls: extractImageUrls(submit) }
+  const taskId = submit.task_id
+  if (!taskId) throw new Error('未返回 task_id')
+  // 2. 轮询结果
+  return pollTask(taskId, signal)
+}
+
+/** 轮询任务结果：先等 30s，之后每 5s 一次 */
+const POLL_FIRST_WAIT = 30_000
+const POLL_INTERVAL = 5000
+const MAX_POLLS = 90  // 30s + 90×5s ≈ 最多 ~8 分钟
+async function pollTask(taskId: string, signal?: AbortSignal): Promise<{ imageUrls: string[] }> {
+  await new Promise(r => setTimeout(r, POLL_FIRST_WAIT))
+  for (let i = 0; i < MAX_POLLS; i++) {
+    if (signal?.aborted) throw new Error('⏱ 生成超时，请简化描述或减少细节后重试')
+    try {
+      const resp = await fetch(`${base()}/v1/images/tasks/${taskId}`, {
+        headers: { Authorization: `Bearer ${useConfigStore().apiKey}` }, signal,
+      })
+      if (resp.ok) {
+        const result = await resp.json()
+        if (result.status === 'success') return { imageUrls: extractImageUrls(result) }
+        if (result.status === 'failed' || result.status === 'violated') {
+          const errCode = result.error || 'unknown'
+          const zh = ERROR_LABELS[errCode]
+          throw new Error(zh || `生成失败：${errCode}`)
+        }
+      }
+    } catch (e: any) {
+      if (e?.message && !e.message.includes('fetch')) throw e  // 业务错误直接抛
+      // 网络波动，跳过继续
+    }
+    await new Promise(r => setTimeout(r, POLL_INTERVAL))
+  }
+  throw new Error('⏱ 轮询超时，请重试')
 }
 
 /** GPT Image 图生图 — /v1/images/edits（同步） */

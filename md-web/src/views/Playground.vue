@@ -126,9 +126,8 @@ function dlImg(u:string,i:number){
 const chatEl=ref<HTMLElement>()
 function scrollBot(){nextTick(()=>{if(chatEl.value) chatEl.value.scrollTop=chatEl.value.scrollHeight})}
 function fmtT(t:string){if(!t) return '';const d=new Date(t);if(isNaN(d.getTime())) return t;const p=(n:number)=>String(n).padStart(2,'0');return `${p(d.getHours())}:${p(d.getMinutes())}`}
-// ===== Generate（同步模式，5 分钟超时） =====
+// ===== Generate（异步：提交秒回 + 轮询拿结果） =====
 const activeTasks = ref(0)
-const TIMEOUT = 300_000
 async function generate() {
   const p=prompt.value.trim(); if(!p||!selectedModel.value) return
   const conv=curConv.value; if(!conv) return
@@ -136,36 +135,30 @@ async function generate() {
   const gem=isGemini.value; const total=gptN.value; const refs=[...uploadedImages.value]
   const qual=gptQuality.value
   let fp=p; if(!gem&&ratio!=='1:1'&&ratio!=='auto') fp=`Make the aspect ratio ${ratio} , ${p}`
-  // 用时间戳做计时器 key
   const tKey = 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,6)
-  // 插入消息
   const userMsg: Msg = {role:'user',prompt:p,model:mdl,ratio,quality:qual,count:total,images:[],time:new Date().toISOString(),refs}
   const aiMsg: Msg = {role:'ai',images:[],status:'generating',time:tKey,count:total}
   conv.msgs.push(userMsg, aiMsg)
   if(conv.title==='新对话') conv.title=p.slice(0,20)||'图片生成'
   conv.ts=Date.now(); prompt.value=''; uploadedImages.value=[]; scrollBot()
-  // 独立计时
   timers[tKey] = 0
   const timer = setInterval(()=>{ timers[tKey]++ }, 1000)
-  const ac = new AbortController()
-  const to = setTimeout(()=>ac.abort('timeout'), TIMEOUT)
   activeTasks.value++
   const aiIdx = conv.msgs.length - 1
   try {
     if(gem) {
       for(let i=0;i<total;i++) for(let a=1;a<=3;a++) {
         try {
-          const r=await generateGemini(mdl,fp,ac.signal)
+          const r=await generateGemini(mdl,fp)
           if(r.imageUrls.length){ conv.msgs[aiIdx].images.push(...r.imageUrls); scrollBot(); break }
           if(r.text) conv.msgs[aiIdx].text=r.text
-        } catch(e:any){if(ac.signal.aborted){conv.msgs[aiIdx].text='⏱ 生成超时，请简化描述或减少细节后重试';break};if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
+        } catch(e:any){if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
       }
     } else {
       const errors: string[] = []
-      const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,ac.signal,qual):generateImage(mdl,fp,1,sz,ac.signal,qual))
+      const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,undefined,qual):generateImage(mdl,fp,1,sz,undefined,qual))
         .then(r=>{if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}}).catch((e:any)=>{
-          if(ac.signal.aborted) errors.push('⏱ 生成超时，请简化描述或减少细节后重试')
-          else if(e?.message) errors.push(e.message)
+          if(e?.message) errors.push(e.message)
         }))
       await Promise.allSettled(tasks)
       if(!conv.msgs[aiIdx].images.length && errors.length) conv.msgs[aiIdx].text = errors[0]
@@ -173,7 +166,7 @@ async function generate() {
     conv.msgs[aiIdx].status = conv.msgs[aiIdx].images.length ? 'done' : 'failed'
     conv.msgs[aiIdx].time = new Date().toISOString()
   } catch{ conv.msgs[aiIdx].status='failed'; conv.msgs[aiIdx].time=new Date().toISOString() }
-  finally { activeTasks.value--; clearInterval(timer); clearTimeout(to); delete timers[tKey]; doSave() }
+  finally { activeTasks.value--; clearInterval(timer); delete timers[tKey]; doSave() }
 }
 function copyPrompt(text?:string) {
   if(!text) return
