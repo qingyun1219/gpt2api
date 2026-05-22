@@ -159,13 +159,13 @@ async function generate() {
           const r=await generateGemini(mdl,fp,ac.signal)
           if(r.imageUrls.length){ conv.msgs[aiIdx].images.push(...r.imageUrls); scrollBot(); break }
           if(r.text) conv.msgs[aiIdx].text=r.text
-        } catch(e:any){if(ac.signal.aborted){conv.msgs[aiIdx].text='⏱ 生成超时，请重试';break};if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
+        } catch(e:any){if(ac.signal.aborted){conv.msgs[aiIdx].text='⏱ 生成超时，请简化描述或减少细节后重试';break};if(a===3)break;await new Promise(r=>setTimeout(r,a*2000))}
       }
     } else {
       const errors: string[] = []
       const tasks=Array.from({length:total},()=>(refs.length?editImage(mdl,fp,refs,1,sz,ac.signal,qual):generateImage(mdl,fp,1,sz,ac.signal,qual))
         .then(r=>{if(r.imageUrls.length){conv.msgs[aiIdx].images.push(...r.imageUrls);scrollBot()}}).catch((e:any)=>{
-          if(ac.signal.aborted) errors.push('⏱ 生成超时，图片可能仍在后台处理中，请稍后刷新重试')
+          if(ac.signal.aborted) errors.push('⏱ 生成超时，请简化描述或减少细节后重试')
           else if(e?.message) errors.push(e.message)
         }))
       await Promise.allSettled(tasks)
