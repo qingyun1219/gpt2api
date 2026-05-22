@@ -102,7 +102,7 @@ export async function fetchModels(): Promise<ModelInfo[]> {
     }))
 }
 
-/** GPT Image 文生图 — /v1/images/generations */
+/** GPT Image 文生图（异步） — 提交 + 轮询 */
 export async function generateImage(
   model: string,
   prompt: string,
@@ -111,21 +111,52 @@ export async function generateImage(
   signal?: AbortSignal,
   quality?: string,
 ): Promise<{ imageUrls: string[] }> {
-  const body: Record<string, any> = { model, prompt, n, size, response_format: 'b64_json' }
+  const body: Record<string, any> = { model, prompt, n, size, response_format: 'b64_json', wait: false }
   if (quality && quality !== '1k') body.upscale = quality
+  // 1. 提交任务（秒回）
   const resp = await fetch(`${base()}/v1/images/generations`, {
     method: 'POST', headers: headers(), body: JSON.stringify(body), signal,
   })
-  if (!resp.ok) {
+  if (!resp.ok && resp.status !== 202) {
     const e = await resp.text()
     throw new Error(parseApiError(resp.status, e))
   }
-  const data = await resp.json()
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error))
-  return { imageUrls: extractImageUrls(data) }
+  const submit = await resp.json()
+  if (submit.error) throw new Error(submit.error.message || JSON.stringify(submit.error))
+  // 同步模式兜底：如果后端直接返回了 data（没走异步）
+  if (submit.data?.length) return { imageUrls: extractImageUrls(submit) }
+  const taskId = submit.task_id
+  if (!taskId) throw new Error('未返回 task_id')
+  // 2. 轮询结果
+  return pollTask(taskId, signal)
 }
 
-/** GPT Image 图生图 — /v1/images/edits (multipart/form-data) */
+/** 轮询任务结果 */
+const POLL_INTERVAL = 4000
+const MAX_POLLS = 150  // 最多 10 分钟
+async function pollTask(taskId: string, signal?: AbortSignal): Promise<{ imageUrls: string[] }> {
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL))
+    if (signal?.aborted) throw new Error('⏱ 生成超时，请简化描述或减少细节后重试')
+    const resp = await fetch(`${base()}/v1/images/tasks/${taskId}`, {
+      headers: { Authorization: `Bearer ${useConfigStore().apiKey}` }, signal,
+    })
+    if (!resp.ok) continue  // 网络波动，跳过这次继续
+    const result = await resp.json()
+    if (result.status === 'success') {
+      return { imageUrls: extractImageUrls(result) }
+    }
+    if (result.status === 'failed') {
+      const errCode = result.error || 'unknown'
+      const zh = ERROR_LABELS[errCode]
+      throw new Error(zh || `生成失败：${errCode}`)
+    }
+    // queued / dispatched / running → 继续轮询
+  }
+  throw new Error('⏱ 轮询超时，请重试')
+}
+
+/** GPT Image 图生图（异步） — /v1/images/edits */
 export async function editImage(
   model: string,
   prompt: string,

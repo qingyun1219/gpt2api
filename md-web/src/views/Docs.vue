@@ -89,7 +89,35 @@ const config = useConfigStore()
       <p class="note">每项支持：data URL / https URL / 纯 base64 字符串</p>
     </section>
 
-    <section class="card"><h2>④ 通过 chat 接口生图</h2>
+    <section class="card"><h2>④ 异步模式（推荐）</h2>
+      <p class="ep">POST <code>/v1/images/generations</code>　+ <code>"wait": false</code></p>
+      <p class="note">默认同步阻塞等待生成完毕。加 <code>"wait": false</code> 后秒回 task_id，通过轮询获取结果，不怕超时和网络波动。</p>
+      <h3>第 1 步：提交任务</h3>
+      <pre class="code">{
+  "model": "gpt-image-2",
+  "prompt": "A futuristic city at sunset",
+  "response_format": "b64_json",
+  "wait": false
+}
+// → 202 Accepted
+{
+  "task_id": "img_xxxxxxxx",
+  "status": "dispatched",
+  "message": "任务已提交,请通过 GET /v1/images/tasks/img_xxxxxxxx 查询结果"
+}</pre>
+      <h3>第 2 步：轮询结果</h3>
+      <p class="ep">GET <code>/v1/images/tasks/{task_id}</code></p>
+      <pre class="code">// → 200 OK
+{
+  "task_id": "img_xxxxxxxx",
+  "status": "success",
+  "data": [{ "b64_json": "/9j/4AAQ..." }]
+}
+// status 流转：queued → dispatched → running → success / failed</pre>
+      <p class="note">建议每 3~5 秒轮询一次。status 为 <code>success</code> 或 <code>failed</code> 时停止。</p>
+    </section>
+
+    <section class="card"><h2>⑤ 通过 chat 接口生图</h2>
       <p class="ep">POST <code>/v1/chat/completions</code></p>
       <p class="note">支持 Gemini 生图和 GPT Image 生图，统一走 chat 接口。model 设为图片模型即可。</p>
       <pre class="code">{
@@ -100,7 +128,7 @@ const config = useConfigStore()
       <p class="note">也支持 <code>gemini-3.1-flash-image</code>。返回标准 ChatCompletion 格式，图片以 markdown data URL 嵌入 content。</p>
     </section>
 
-    <section class="card"><h2>⑤ 响应格式</h2>
+    <section class="card"><h2>⑥ 响应格式</h2>
       <h3>/v1/images/generations · /v1/images/edits</h3>
       <pre class="code">{
   "created": 1234567890,
@@ -125,7 +153,7 @@ const config = useConfigStore()
       <p class="note">图片在 <code>choices[0].message.content</code> 中以 markdown data URL 返回。同时 <code>data</code> 字段也保留，可按任一方式取图。</p>
     </section>
 
-    <section class="card"><h2>⑥ 错误码参考</h2>
+    <section class="card"><h2>⑦ 错误码参考</h2>
       <p class="note">错误返回 OpenAI 格式：<code>{"error":{"code":"xxx","message":"..."}}</code></p>
       <table class="tb"><thead><tr><th>错误码</th><th>HTTP</th><th>含义</th><th>建议</th></tr></thead><tbody>
         <tr><td><code>no_available_account</code></td><td>503</td><td>账号池暂无可用账号</td><td>等 30s 重试</td></tr>
