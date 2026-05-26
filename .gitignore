@@ -97,3 +97,8 @@ Thumbs.db
 /*.json
 /aug-api/
 /*.zip
+
+md-web-tu/
+.ai-docs/
+test/
+*.zip
