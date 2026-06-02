@@ -303,7 +303,10 @@ async function urlToDataUrl(url: string): Promise<string> {
   // 修正上游返回的裸 IP 或旧域名 → 走 newapi 代理
   url = normalizeImageUrl(url)
   try {
-    const resp = await fetch(url)
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 15_000)  // 15 秒超时
+    const resp = await fetch(url, { signal: ctrl.signal })
+    clearTimeout(timer)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const blob = await resp.blob()
     return new Promise((resolve) => {
