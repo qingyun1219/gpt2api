@@ -258,8 +258,11 @@ function extractImageUrls(data: any): string[] {
 /** 把外部 URL 转成 data URL（base64），失败则返回原 URL */
 async function urlToDataUrl(url: string): Promise<string> {
   if (url.startsWith('data:')) return url
+  // 修正上游返回的裸 IP 或旧域名 → 走 newapi 代理
+  url = normalizeImageUrl(url)
   try {
     const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const blob = await resp.blob()
     return new Promise((resolve) => {
       const reader = new FileReader()
@@ -268,6 +271,14 @@ async function urlToDataUrl(url: string): Promise<string> {
       reader.readAsDataURL(blob)
     })
   } catch { return url }
+}
+
+/** 把上游裸 IP / 旧域名的图片 URL 替换为走 newapi 代理 */
+function normalizeImageUrl(url: string): string {
+  // 匹配 /p/img/ 路径，替换 host 为 baseUrl
+  const m = url.match(/https?:\/\/[^/]+(\/p\/img\/.+)/)
+  if (m) return `${base()}${m[1]}`
+  return url
 }
 
 /** 提取图片并全部转为 base64 data URL */
