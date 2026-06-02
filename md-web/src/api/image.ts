@@ -143,34 +143,76 @@ export async function generateImage(
   return { imageUrls: poll.imageUrls, taskId: result.taskId }
 }
 
+/** 可重试的错误码 — 上游换号/重试中，继续轮询 */
+const RETRYABLE_ERRORS = new Set([
+  'auth_required', 'network_transient', 'upstream_error',
+  'pow_timeout', 'pow_failed', 'turnstile_required',
+  'rate_limited', 'rate_limit_rpm',
+])
+
 /** 轮询任务结果：先等 firstWait，之后每 5s 一次 */
 const POLL_FIRST_WAIT = 30_000
 const POLL_INTERVAL = 5000
 const MAX_POLLS = 90
 export async function pollTask(taskId: string, signal?: AbortSignal, skipFirstWait = false): Promise<{ imageUrls: string[] }> {
   if (!skipFirstWait) await new Promise(r => setTimeout(r, POLL_FIRST_WAIT))
+  let lastError = ''
+  let httpFailCount = 0          // 连续 HTTP 非 200 次数
+  const MAX_HTTP_FAILS = 10      // 连续 10 次 HTTP 错误就放弃
   for (let i = 0; i < MAX_POLLS; i++) {
     if (signal?.aborted) throw new Error('⏱ 生成超时，请简化描述或减少细节后重试')
     try {
       const resp = await fetch(`${base()}/v1/images/tasks/${taskId}`, {
         headers: { Authorization: `Bearer ${useConfigStore().apiKey}` }, signal,
       })
-      if (resp.ok) {
-        const result = await resp.json()
-        if (result.status === 'success') return { imageUrls: await extractAndConvertImages(result) }
-        if (result.status === 'failed' || result.status === 'violated') {
-          const errCode = result.error || 'unknown'
+      if (!resp.ok) {
+        // HTTP 错误（401/404/502 等）：记录并继续，但连续太多次就放弃
+        httpFailCount++
+        const body = await resp.text().catch(() => '')
+        console.warn(`[poll #${i}] HTTP ${resp.status} (fail ${httpFailCount}/${MAX_HTTP_FAILS}):`, body.slice(0, 200))
+        lastError = `HTTP ${resp.status}`
+        if (httpFailCount >= MAX_HTTP_FAILS) {
+          throw new Error(`生成失败：轮询连续 ${httpFailCount} 次 HTTP ${resp.status}`)
+        }
+        await new Promise(r => setTimeout(r, POLL_INTERVAL))
+        continue
+      }
+      httpFailCount = 0  // 重置连续失败计数
+
+      const result = await resp.json()
+      // ---- 成功 ----
+      if (result.status === 'success' || result.status === 'succeeded') {
+        return { imageUrls: await extractAndConvertImages(result) }
+      }
+      // ---- 失败/违规 ----
+      if (result.status === 'failed' || result.status === 'violated') {
+        const errCode = (result.error || '').split(':')[0].trim() || 'unknown'
+        if (RETRYABLE_ERRORS.has(errCode)) {
+          lastError = result.error || errCode
+          // 可重试 → 继续轮询
+        } else {
+          // 不可重试终态 → 立即中断
           const zh = ERROR_LABELS[errCode]
-          throw new Error(zh || `生成失败：${errCode}`)
+          throw new Error(zh || `生成失败：${result.error || errCode}`)
         }
       }
+      // ---- 其他中间状态（queued/dispatched/running）→ 正常继续轮询 ----
     } catch (e: any) {
-      if (e?.message && !e.message.includes('fetch')) throw e  // 业务错误直接抛
-      // 网络波动，跳过继续
+      // 明确的业务错误 → 直接抛出，不吞
+      if (e?.message?.startsWith('生成失败') || e?.message?.startsWith('内容策略')
+        || e?.message?.startsWith('⏱')) throw e
+      // 仅 fetch 网络层错误（TypeError: Failed to fetch / AbortError）允许继续轮询
+      if (e instanceof TypeError || e?.name === 'AbortError') {
+        console.warn(`[poll #${i}] network error:`, e?.message)
+        // 继续下一轮
+      } else {
+        // 未知异常 → 不吞，直接抛
+        throw e
+      }
     }
     await new Promise(r => setTimeout(r, POLL_INTERVAL))
   }
-  throw new Error('⏱ 轮询超时，请重试')
+  throw new Error(lastError ? `生成失败：${lastError}` : '⏱ 轮询超时，请重试')
 }
 
 /** GPT Image 图生图 — /v1/images/edits（同步） */
